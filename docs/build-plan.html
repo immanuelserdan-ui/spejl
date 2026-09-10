@@ -1,0 +1,1001 @@
+<title>Spejl Build Plan</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo+Narrow:wght@500;600;700&family=Public+Sans:ital,wght@0,400;0,500;0,600;1,400&family=Spline+Sans+Mono:wght@400;500;600&display=swap">
+
+<style>
+  /* ---------- tokens: complete light palette on bare :root ---------- */
+  :root {
+    --paper:      #F4F7F8;
+    --surface:    #FFFFFF;
+    --surface-2:  #EAF0F2;
+    --ink:        #101820;
+    --ink-2:      #3D4C57;
+    --ink-3:      #6B7C87;
+    --rule:       #C7D4DA;
+    --rule-soft:  #DEE7EA;
+    --accent:     #0A6E8A;
+    --accent-ink: #075064;
+    --accent-wash:#DCEFF5;
+    --warn:       #A24C07;
+    --warn-wash:  #FBEADB;
+    --good:       #1C7048;
+    --good-wash:  #DCEFE4;
+    --stop:       #97302B;
+    --stop-wash:  #F7E3E1;
+    --poche:      #101820;
+
+    --shadow: 0 1px 2px rgba(16,24,32,.06), 0 8px 24px -16px rgba(16,24,32,.28);
+
+    --display: "Archivo Narrow", "Arial Narrow", Arial, sans-serif;
+    --body: "Public Sans", -apple-system, "Segoe UI", Helvetica, Arial, sans-serif;
+    --mono: "Spline Sans Mono", ui-monospace, "Cascadia Mono", Consolas, monospace;
+
+    --measure: 68ch;
+    --rail: 244px;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper:      #0D1317;
+      --surface:    #141D23;
+      --surface-2:  #1B262D;
+      --ink:        #E3EBEF;
+      --ink-2:      #AFC0C9;
+      --ink-3:      #7C8F9A;
+      --rule:       #2B3A43;
+      --rule-soft:  #222F37;
+      --accent:     #4FC3E0;
+      --accent-ink: #A6E3F2;
+      --accent-wash:#12313C;
+      --warn:       #E5A05C;
+      --warn-wash:  #33220F;
+      --good:       #6DC79A;
+      --good-wash:  #102C1F;
+      --stop:       #E88A82;
+      --stop-wash:  #331A18;
+      --poche:      #E3EBEF;
+      --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper:      #0D1317;
+    --surface:    #141D23;
+    --surface-2:  #1B262D;
+    --ink:        #E3EBEF;
+    --ink-2:      #AFC0C9;
+    --ink-3:      #7C8F9A;
+    --rule:       #2B3A43;
+    --rule-soft:  #222F37;
+    --accent:     #4FC3E0;
+    --accent-ink: #A6E3F2;
+    --accent-wash:#12313C;
+    --warn:       #E5A05C;
+    --warn-wash:  #33220F;
+    --good:       #6DC79A;
+    --good-wash:  #102C1F;
+    --stop:       #E88A82;
+    --stop-wash:  #331A18;
+    --poche:      #E3EBEF;
+    --shadow: 0 1px 2px rgba(0,0,0,.5), 0 10px 28px -18px rgba(0,0,0,.9);
+  }
+
+  /* ---------- base ---------- */
+  * { box-sizing: border-box; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: var(--body);
+    font-size: 15.5px;
+    line-height: 1.62;
+    -webkit-font-smoothing: antialiased;
+  }
+  a { color: var(--accent-ink); text-decoration-thickness: 1px; text-underline-offset: 2px; }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; border-radius: 2px; }
+
+  h1, h2, h3, h4 { font-family: var(--display); font-weight: 700; text-wrap: balance; margin: 0; letter-spacing: -0.005em; }
+  p { margin: 0; }
+  strong { font-weight: 600; }
+  code, kbd { font-family: var(--mono); font-size: .88em; }
+
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: .13em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+  }
+
+  /* ---------- shell ---------- */
+  .shell {
+    display: grid;
+    grid-template-columns: var(--rail) minmax(0, 1fr);
+    gap: 0;
+    max-width: 1360px;
+    margin: 0 auto;
+  }
+
+  /* title-block rail, after a CAD sheet's revision block */
+  .rail {
+    border-right: 1px solid var(--rule);
+    padding: 34px 22px 60px 26px;
+    position: sticky;
+    top: 0;
+    align-self: start;
+    max-height: 100vh;
+    overflow-y: auto;
+  }
+  .rail-mark {
+    font-family: var(--display);
+    font-size: 27px;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+    line-height: 1;
+  }
+  .rail-mark span { color: var(--accent); }
+  .rail-sub { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); margin-top: 7px; letter-spacing: .04em; }
+
+  .rail-meta { display: grid; gap: 0; margin: 26px 0; border-top: 1px solid var(--rule-soft); }
+  .rail-meta div {
+    display: grid; grid-template-columns: 62px 1fr; gap: 8px;
+    padding: 7px 0; border-bottom: 1px solid var(--rule-soft);
+    font-size: 12px; font-family: var(--mono);
+  }
+  .rail-meta dt, .rail-meta .k { color: var(--ink-3); font-size: 10.5px; letter-spacing: .08em; text-transform: uppercase; padding-top: 1px; }
+  .rail-meta .v { color: var(--ink-2); }
+
+  .toc { display: flex; flex-direction: column; gap: 1px; }
+  .toc a {
+    display: grid; grid-template-columns: 26px 1fr; gap: 6px;
+    font-size: 13px; text-decoration: none; color: var(--ink-2);
+    padding: 4px 6px 4px 0; border-radius: 3px;
+  }
+  .toc a i { font-family: var(--mono); font-size: 10.5px; color: var(--ink-3); font-style: normal; padding-top: 2px; }
+  .toc a:hover { color: var(--accent-ink); background: var(--surface-2); }
+
+  main { padding: 34px 44px 120px; min-width: 0; }
+
+  /* ---------- dimension-line section divider ---------- */
+  section { margin-top: 54px; }
+  section:first-of-type { margin-top: 0; }
+  .sec-head { margin-bottom: 20px; }
+  .dimline { display: block; width: 100%; height: 9px; margin: 7px 0 0; color: var(--rule); }
+  .sec-head h2 { font-size: 25px; margin-top: 3px; }
+  .sec-head .lede { color: var(--ink-2); max-width: var(--measure); margin-top: 9px; }
+
+  .prose { max-width: var(--measure); display: flex; flex-direction: column; gap: 14px; }
+  .prose h3 { font-size: 17px; margin-top: 12px; }
+  .prose ul, .prose ol { margin: 0; padding-left: 1.15em; display: flex; flex-direction: column; gap: 7px; }
+  .prose li { padding-left: 2px; }
+
+  /* ---------- header ---------- */
+  .masthead { border-bottom: 1px solid var(--rule); padding-bottom: 26px; }
+  .masthead h1 { font-size: clamp(30px, 4.2vw, 46px); line-height: 1.04; letter-spacing: -0.025em; }
+  .masthead .thesis {
+    font-size: 17.5px; color: var(--ink-2); max-width: 62ch; margin-top: 16px;
+  }
+  .masthead .thesis b { color: var(--ink); font-weight: 600; }
+
+  /* ---------- verdict cards ---------- */
+  .verdicts { display: grid; grid-template-columns: repeat(auto-fit, minmax(228px, 1fr)); gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-top: 28px; }
+  .verdicts > div { background: var(--surface); padding: 17px 18px 19px; display: flex; flex-direction: column; gap: 8px; }
+  .verdicts h3 { font-size: 15.5px; }
+  .verdicts p { font-size: 13.5px; color: var(--ink-2); line-height: 1.5; }
+  .verdicts .num { font-family: var(--mono); font-size: 10.5px; color: var(--accent); letter-spacing: .1em; font-weight: 600; }
+
+  /* ---------- tables ---------- */
+  .tw { overflow-x: auto; border: 1px solid var(--rule); background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: 13.5px; min-width: 620px; }
+  th, td { text-align: left; padding: 10px 13px; border-bottom: 1px solid var(--rule-soft); vertical-align: top; }
+  thead th {
+    font-family: var(--mono); font-size: 10.5px; letter-spacing: .1em; text-transform: uppercase;
+    color: var(--ink-3); font-weight: 600; background: var(--surface-2);
+    border-bottom: 1px solid var(--rule); white-space: nowrap;
+  }
+  tbody tr:last-child td { border-bottom: 0; }
+  td.num, th.num { font-family: var(--mono); font-variant-numeric: tabular-nums; white-space: nowrap; }
+  .rowlab { font-weight: 600; color: var(--ink); }
+  tr.verdict td { background: var(--surface-2); font-weight: 600; border-top: 1px solid var(--rule); }
+
+  .chip {
+    display: inline-block; font-family: var(--mono); font-size: 10.5px; font-weight: 600;
+    letter-spacing: .06em; text-transform: uppercase; padding: 2px 7px; border-radius: 2px; white-space: nowrap;
+  }
+  .chip.ok   { background: var(--good-wash); color: var(--good); }
+  .chip.mid  { background: var(--warn-wash); color: var(--warn); }
+  .chip.no   { background: var(--stop-wash); color: var(--stop); }
+  .chip.acc  { background: var(--accent-wash); color: var(--accent-ink); }
+
+  /* ---------- figures ---------- */
+  figure { margin: 26px 0 0; }
+  figure svg { display: block; width: 100%; max-width: 100%; height: auto; color: var(--ink-2); }
+  .figbox { border: 1px solid var(--rule); background: var(--surface); padding: 20px 20px 14px; overflow-x: auto; }
+  figcaption { font-size: 12.5px; color: var(--ink-3); margin-top: 12px; max-width: 78ch; line-height: 1.5; }
+  figcaption b { color: var(--ink-2); font-weight: 600; }
+  .legend { display: flex; flex-wrap: wrap; gap: 16px; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--rule-soft); font-family: var(--mono); font-size: 10.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-3); }
+  .legend i { display: inline-block; width: 22px; height: 0; border-top-width: 2px; border-top-style: solid; vertical-align: 3px; margin-right: 7px; }
+
+  /* diagram paint, driven from tokens via classes — presentation attributes
+     don't reliably resolve var(), so only geometry lives in the markup */
+  .figbox svg text { fill: var(--ink); font-family: var(--body); }
+  .figbox svg .m      { font-family: var(--mono); }
+  .figbox svg .b      { font-weight: 600; }
+  .figbox svg .muted  { fill: var(--ink-3); }
+  .figbox svg .acc    { fill: var(--accent); }
+  .figbox svg .cau    { fill: var(--warn); }
+  .figbox svg .s-acc  { stroke: var(--accent); }
+  .figbox svg .s-rule { stroke: var(--rule); }
+  .figbox svg .s-poche{ stroke: var(--poche); }
+  .figbox svg .f-acc  { fill: var(--accent); }
+  .figbox svg .f-accw { fill: var(--accent-wash); }
+  .figbox svg .f-s2   { fill: var(--surface-2); }
+  .figbox svg .f-s    { fill: var(--surface); }
+
+  /* ---------- stage list ---------- */
+  .stages { display: flex; flex-direction: column; gap: 1px; background: var(--rule); border: 1px solid var(--rule); margin-top: 22px; }
+  .stage { background: var(--surface); display: grid; grid-template-columns: 74px minmax(0,1fr); gap: 20px; padding: 18px 20px; }
+  .stage .tag { font-family: var(--mono); font-size: 10.5px; font-weight: 600; letter-spacing: .1em; color: var(--accent); text-transform: uppercase; padding-top: 3px; }
+  .stage h3 { font-size: 16px; }
+  .stage .body { display: flex; flex-direction: column; gap: 9px; max-width: 74ch; }
+  .stage p { font-size: 14px; color: var(--ink-2); }
+  .stage ul { margin: 0; padding-left: 1.1em; display: flex; flex-direction: column; gap: 5px; font-size: 13.5px; color: var(--ink-2); }
+  .libs { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 2px; }
+  .libs code { background: var(--surface-2); border: 1px solid var(--rule-soft); padding: 2px 7px; border-radius: 2px; font-size: 11.5px; color: var(--ink-2); }
+
+  /* ---------- code ---------- */
+  pre {
+    margin: 18px 0 0; background: var(--surface); border: 1px solid var(--rule);
+    padding: 16px 18px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px;
+    line-height: 1.62; color: var(--ink-2); tab-size: 2;
+  }
+  pre b { color: var(--ink); font-weight: 600; }
+  pre i { color: var(--ink-3); font-style: normal; }
+  pre u { color: var(--accent-ink); text-decoration: none; }
+
+  /* ---------- callout ---------- */
+  .note {
+    margin-top: 22px; border: 1px solid var(--rule); border-left: 3px solid var(--accent);
+    background: var(--surface); padding: 15px 18px; max-width: 74ch;
+    display: flex; flex-direction: column; gap: 7px;
+  }
+  .note.caution { border-left-color: var(--warn); }
+  .note h4 { font-size: 14px; font-family: var(--display); }
+  .note p { font-size: 13.5px; color: var(--ink-2); }
+
+  /* ---------- math block ---------- */
+  .math { display: grid; gap: 10px; margin-top: 20px; border: 1px solid var(--rule); background: var(--surface); padding: 18px 20px; max-width: 74ch; }
+  .math div { display: grid; grid-template-columns: minmax(0,1fr); gap: 3px; }
+  .math code { font-size: 13px; color: var(--ink); }
+  .math small { font-size: 12.5px; color: var(--ink-3); }
+
+  footer { margin-top: 62px; padding-top: 22px; border-top: 1px solid var(--rule); font-size: 12.5px; color: var(--ink-3); max-width: 78ch; display: flex; flex-direction: column; gap: 8px; }
+
+  @media (max-width: 900px) {
+    .shell { grid-template-columns: minmax(0,1fr); }
+    .rail { position: static; max-height: none; border-right: 0; border-bottom: 1px solid var(--rule); padding: 26px 22px 26px; }
+    .toc { display: grid; grid-template-columns: repeat(auto-fill, minmax(190px, 1fr)); }
+    main { padding: 28px 22px 90px; }
+    .stage { grid-template-columns: minmax(0,1fr); gap: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+</style>
+
+<div class="shell">
+
+  <!-- ============ title block rail ============ -->
+  <aside class="rail">
+    <div class="rail-mark">Spejl<span>.</span></div>
+    <div class="rail-sub">readable-text plan mirroring</div>
+
+    <div class="rail-meta">
+      <div><span class="k">Status</span><span class="v">Blueprint, pre-build</span></div>
+      <div><span class="k">Verdict</span><span class="v">Python core + UXP panel</span></div>
+      <div><span class="k">Effort</span><span class="v">12–15 dev-days</span></div>
+      <div><span class="k">Target</span><span class="v">Win 11, Py 3.12</span></div>
+      <div><span class="k">Golden</span><span class="v">DK 2-room unit plan</span></div>
+    </div>
+
+    <nav class="toc" aria-label="Sections">
+      <a href="#reframe"><i>01</i><span>The real problem</span></a>
+      <a href="#pipeline"><i>02</i><span>Pipeline</span></a>
+      <a href="#stack"><i>03</i><span>Stack decision</span></a>
+      <a href="#logic"><i>04</i><span>Processing stages</span></a>
+      <a href="#math"><i>05</i><span>Mirror mathematics</span></a>
+      <a href="#ui"><i>06</i><span>UI &amp; UX flow</span></a>
+      <a href="#arch"><i>07</i><span>Code architecture</span></a>
+      <a href="#roadmap"><i>08</i><span>Roadmap</span></a>
+      <a href="#edges"><i>09</i><span>Edge cases</span></a>
+      <a href="#qa"><i>10</i><span>Acceptance tests</span></a>
+      <a href="#setup"><i>11</i><span>Environment</span></a>
+    </nav>
+  </aside>
+
+  <!-- ============ main ============ -->
+  <main>
+
+    <header class="masthead">
+      <div class="eyebrow">Technical blueprint &middot; automated plan mirroring</div>
+      <h1>Mirror the walls, re&#8209;set the type</h1>
+      <p class="thesis">A flip is one line of OpenCV. The whole engineering problem is the text: <b>find every string, erase it, mirror the drawing, then re-render the same characters unreflected at the mirrored anchor</b> — with the drafting conventions that make <code>5155</code> still read bottom-to-top after it moves from the right edge to the left.</p>
+
+      <div class="verdicts">
+        <div>
+          <span class="num">RECOMMENDATION 1</span>
+          <h3>Route by input type first</h3>
+          <p>If the plan exists as vector PDF or SVG — and CAD-exported plans usually do — mirror the page transform and counter-flip each text matrix. Lossless, no OCR, no inpainting, ~200 lines. Build this before touching computer vision.</p>
+        </div>
+        <div>
+          <span class="num">RECOMMENDATION 2</span>
+          <h3>Standalone Python for the raster path</h3>
+          <p>OpenCV, RapidOCR and Pillow do the work; PySide6 supplies the review canvas. Photoshop UXP has no OCR runtime and Revit cannot see inside a PNG at all.</p>
+        </div>
+        <div>
+          <span class="num">RECOMMENDATION 3</span>
+          <h3>Ship a review step, not an oracle</h3>
+          <p>OCR will mangle <span style="font-family:var(--mono)">Køkken</span> and <span style="font-family:var(--mono)">Vær.</span> some of the time. A 20-second correction pass beats a 40-minute Photoshop retype and is the difference between a demo and a tool the team trusts.</p>
+        </div>
+      </div>
+    </header>
+
+    <!-- ---------- 01 ---------- -->
+    <section id="reframe">
+      <div class="sec-head">
+        <div class="eyebrow">01 &middot; framing</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>You are not mirroring an image. You are re-typesetting an annotated drawing.</h2>
+        <p class="lede">Every design decision below follows from that sentence, and from one more observation: a raster plan is a drawing that has already lost information the tool then has to guess back.</p>
+      </div>
+
+      <div class="prose">
+        <p>The sample unit plan carries three classes of mark, and each behaves differently under reflection:</p>
+        <ul>
+          <li><strong>Geometry</strong> — poché walls, door swings, the kitchen run, the WC fixtures. Reflection is <em>correct and complete</em>. A door that swung right now swings left, which is exactly what a mirrored unit does.</li>
+          <li><strong>Annotation glyphs</strong> — <code>Køkken</code>, <code>Stue</code>, <code>Vær. 1</code>, <code>Bad</code>, <code>Toilet</code>, <code>Entre</code>, and the millimetre dimensions <code>4045</code>, <code>3200</code>, <code>5155</code>, <code>2105</code>, <code>870</code>. Reflection is <em>wrong</em>. Only their anchor points should move.</li>
+          <li><strong>Orientation-bearing symbols</strong> — a north arrow, a scale bar, a title block, a stair direction arrow, a company logo. Reflection is <em>actively harmful</em>: a mirrored north arrow is a false statement about the building. These must be detected and excluded, then pasted back unmirrored at a mirrored anchor.</li>
+        </ul>
+        <p>The third class is the one hand-mirroring in Photoshop also gets wrong, and it is worth designing for from day one even though the sample plan happens to contain none.</p>
+
+        <h3>The information-loss ladder</h3>
+        <p>Accuracy is decided by what format reaches the tool, not by how clever the algorithm is. Route accordingly:</p>
+      </div>
+
+      <div class="tw" style="margin-top:20px">
+        <table>
+          <thead><tr><th>Input</th><th>What survives</th><th>Text fidelity</th><th>Route</th></tr></thead>
+          <tbody>
+            <tr><td class="rowlab">Revit / DWG model</td><td>Real text entities, styles, dimension objects</td><td><span class="chip ok">Exact</span></td><td>Mirror natively upstream — no tool needed</td></tr>
+            <tr><td class="rowlab">Vector PDF, SVG, AI</td><td>Glyph runs, transform matrices, embedded fonts</td><td><span class="chip ok">Exact</span></td><td><strong>Route A</strong> — matrix counter-flip</td></tr>
+            <tr><td class="rowlab">300 dpi PNG / TIFF</td><td>Pixels only; strings must be inferred</td><td><span class="chip mid">98–99% chars</span></td><td><strong>Route B</strong> — CV + OCR + re-render</td></tr>
+            <tr><td class="rowlab">Screenshot / compressed JPEG</td><td>Pixels, plus ringing and blocking artefacts</td><td><span class="chip no">85–95% chars</span></td><td>Route B with 2× upscale, review mandatory</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <h4>Ask where the PNGs come from before writing any OpenCV</h4>
+        <p>If the team's PNGs are exported from Revit or a PDF that still exists on the server, Route A alone eliminates the manual work at 100% fidelity, and the CV pipeline becomes a fallback for client-supplied images rather than the main product. That single question can cut this project in half.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 02 ---------- -->
+    <section id="pipeline">
+      <div class="sec-head">
+        <div class="eyebrow">02 &middot; mechanism</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Two routes, one output contract</h2>
+        <p class="lede">Both paths emit the same pair of files: the mirrored drawing and a JSON sidecar recording every text placement, its source string, and its confidence. The sidecar is what makes the result auditable and re-editable.</p>
+      </div>
+
+      <figure>
+        <div class="figbox">
+          <svg viewBox="0 0 1180 372" role="img" aria-label="Pipeline diagram: a source plan is routed by format. Vector inputs go through page-matrix flip and per-text-run matrix counter-flip, which is lossless. Raster inputs go through OCR text detection, text erasure and inpainting, a full image flip, text re-rendering, and human review. Both routes converge on a mirrored drawing plus a JSON sidecar.">
+            <defs>
+              <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path d="M 0 0 L 10 5 L 0 10 z" fill="currentColor"/>
+              </marker>
+              <marker id="ara" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+                <path class="f-acc" d="M 0 0 L 10 5 L 0 10 z"/>
+              </marker>
+            </defs>
+
+            <!-- lane labels -->
+            <text class="m b acc" x="270" y="46" font-size="11" letter-spacing="1.4">ROUTE A — LOSSLESS</text>
+            <text class="m b" x="270" y="344" font-size="11" letter-spacing="1.4">ROUTE B — RECONSTRUCTED</text>
+
+            <!-- input -->
+            <rect class="f-s2" x="16" y="155" width="112" height="64" rx="3" stroke="currentColor" stroke-width="1.4"/>
+            <text class="b" x="72" y="181" text-anchor="middle" font-size="12.5">Source plan</text>
+            <text class="m muted" x="72" y="199" text-anchor="middle" font-size="10">drag &amp; drop</text>
+
+            <!-- router -->
+            <polygon points="200,141 246,187 200,233 154,187" fill="none" stroke="currentColor" stroke-width="1.4"/>
+            <text class="m b" x="200" y="184" text-anchor="middle" font-size="10.5">has</text>
+            <text class="m b" x="200" y="196" text-anchor="middle" font-size="10.5">glyphs?</text>
+            <line x1="128" y1="187" x2="152" y2="187" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+
+            <!-- router to lane A -->
+            <polyline class="s-acc" points="200,141 200,92 266,92" fill="none" stroke-width="1.6" marker-end="url(#ara)"/>
+            <text class="m acc" x="210" y="112" font-size="10">yes</text>
+            <!-- router to lane B -->
+            <polyline points="200,233 200,282 266,282" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+            <text class="m muted" x="210" y="262" font-size="10">no</text>
+
+            <!-- ROUTE A boxes -->
+            <g class="s-acc f-accw" stroke-width="1.6">
+              <rect x="270" y="66" width="200" height="52" rx="3"/>
+              <rect x="520" y="66" width="200" height="52" rx="3"/>
+              <rect x="770" y="66" width="200" height="52" rx="3"/>
+            </g>
+            <g text-anchor="middle">
+              <text class="b" x="370" y="88" font-size="12.5">Parse text runs</text>
+              <text class="m muted" x="370" y="105" font-size="10">PyMuPDF rawdict</text>
+              <text class="b" x="620" y="88" font-size="12.5">Flip page matrix</text>
+              <text class="m muted" x="620" y="105" font-size="10">Matrix(-1, 0, 0, 1, W, 0)</text>
+              <text class="b" x="870" y="88" font-size="12.5">Counter-flip each run</text>
+              <text class="m muted" x="870" y="105" font-size="10">redraw at mirrored anchor</text>
+            </g>
+
+            <g class="s-acc" stroke-width="1.6" marker-end="url(#ara)">
+              <line x1="470" y1="92" x2="516" y2="92"/>
+              <line x1="720" y1="92" x2="766" y2="92"/>
+            </g>
+
+            <!-- ROUTE B boxes -->
+            <g class="f-s2" stroke="currentColor" stroke-width="1.4">
+              <rect x="270" y="256" width="124" height="52" rx="3"/>
+              <rect x="414" y="256" width="124" height="52" rx="3"/>
+              <rect x="558" y="256" width="124" height="52" rx="3"/>
+              <rect x="702" y="256" width="124" height="52" rx="3"/>
+              <rect x="846" y="256" width="124" height="52" rx="3"/>
+            </g>
+            <g text-anchor="middle">
+              <text class="b" x="332" y="278" font-size="12">Detect text</text>
+              <text class="b" x="476" y="278" font-size="12">Erase + repair</text>
+              <text class="b" x="620" y="278" font-size="12">Flip raster</text>
+              <text class="b" x="764" y="278" font-size="12">Re-render type</text>
+              <text class="b" x="908" y="278" font-size="12">Review</text>
+              <text class="m muted" x="332" y="295" font-size="9.5">RapidOCR + lexicon</text>
+              <text class="m muted" x="476" y="295" font-size="9.5">mask, fill, lines</text>
+              <text class="m muted" x="620" y="295" font-size="9.5">cv2.flip(img, 1)</text>
+              <text class="m muted" x="764" y="295" font-size="9.5">Pillow, fit-to-box</text>
+              <text class="m muted" x="908" y="295" font-size="9.5">operator confirms</text>
+            </g>
+            <g stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)">
+              <line x1="394" y1="282" x2="410" y2="282"/>
+              <line x1="538" y1="282" x2="554" y2="282"/>
+              <line x1="682" y1="282" x2="698" y2="282"/>
+              <line x1="826" y1="282" x2="842" y2="282"/>
+            </g>
+
+            <!-- text data bypass: detect -> re-render -->
+            <polyline points="332,256 332,214 764,214 764,252" fill="none" stroke="currentColor" stroke-width="1.2" stroke-dasharray="5 4" marker-end="url(#ar)"/>
+            <text class="m muted" x="548" y="207" text-anchor="middle" font-size="10">strings, size, angle — never flipped</text>
+
+            <!-- output -->
+            <rect x="1010" y="147" width="156" height="80" rx="3" fill="none" stroke="currentColor" stroke-width="1.8"/>
+            <text class="b" x="1088" y="172" text-anchor="middle" font-size="12.5">Mirrored plan</text>
+            <text class="m muted" x="1088" y="190" text-anchor="middle" font-size="10">*_mirrored.png</text>
+            <text class="m muted" x="1088" y="207" text-anchor="middle" font-size="10">*.spejl.json</text>
+
+            <polyline class="s-acc" points="970,92 992,92 992,187 1006,187" fill="none" stroke-width="1.6" marker-end="url(#ara)"/>
+            <polyline points="970,282 992,282 992,187 1006,187" fill="none" stroke="currentColor" stroke-width="1.4" marker-end="url(#ar)"/>
+          </svg>
+
+          <div class="legend">
+            <span><i style="border-color:var(--accent)"></i>Lossless — glyphs preserved</span>
+            <span><i style="border-color:currentColor"></i>Reconstructed — glyphs inferred</span>
+            <span><i style="border-color:currentColor;border-top-style:dashed"></i>Text data, exempt from the flip</span>
+          </div>
+        </div>
+        <figcaption><b>Figure 1.</b> The dashed path is the whole trick: text attributes are extracted <em>before</em> the flip and applied <em>after</em> it, so they never pass through the reflection. Route A does this with transform matrices and keeps the original glyph outlines; Route B does it with OCR and re-renders from a font file.</figcaption>
+      </figure>
+    </section>
+
+    <!-- ---------- 03 ---------- -->
+    <section id="stack">
+      <div class="sec-head">
+        <div class="eyebrow">03 &middot; stack decision</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Python core, optional Photoshop face, Revit out of scope</h2>
+        <p class="lede">Scored against the job as stated: a raster image goes in, a mirrored readable raster comes out, run over batches of unit-type plans.</p>
+      </div>
+
+      <div class="tw" style="margin-top:20px">
+        <table>
+          <thead>
+            <tr><th>Criterion</th><th>Standalone Python</th><th>Photoshop UXP</th><th>Revit C# add-in</th></tr>
+          </thead>
+          <tbody>
+            <tr><td class="rowlab">OCR &amp; CV runtime available</td><td><span class="chip ok">Native</span> OpenCV, ONNX</td><td><span class="chip no">None</span> needs WASM or sidecar</td><td><span class="chip no">N/A</span> cannot read pixels</td></tr>
+            <tr><td class="rowlab">Raster inpainting</td><td><span class="chip ok">Full control</span></td><td><span class="chip mid">Content-Aware via batchPlay</span></td><td><span class="chip no">None</span></td></tr>
+            <tr><td class="rowlab">Text re-render fidelity</td><td><span class="chip ok">Pillow / Skia, sub-pixel</span></td><td><span class="chip ok">Real text layers</span></td><td><span class="chip ok">Real TextNotes</span></td></tr>
+            <tr><td class="rowlab">Output stays editable</td><td><span class="chip mid">PNG + JSON sidecar</span></td><td><span class="chip ok">Layered PSD</span></td><td><span class="chip ok">Live model</span></td></tr>
+            <tr><td class="rowlab">Batch 200 plans unattended</td><td><span class="chip ok">CLI, trivial</span></td><td><span class="chip mid">Scriptable, slow, app must run</span></td><td><span class="chip no">Not applicable</span></td></tr>
+            <tr><td class="rowlab">IT / licensing friction</td><td><span class="chip ok">One signed exe</span></td><td><span class="chip mid">CC licence per seat, UXP signing</span></td><td><span class="chip mid">Revit licence, add-in manifest</span></td></tr>
+            <tr><td class="rowlab">Fits the stated input (PNG/JPEG)</td><td><span class="chip ok">Directly</span></td><td><span class="chip ok">Directly</span></td><td><span class="chip no">Requires vectorising first</span></td></tr>
+            <tr><td class="rowlab">Dev velocity to first useful build</td><td><span class="chip ok">~3 days</span></td><td><span class="chip mid">~8 days incl. sidecar</span></td><td><span class="chip no">Weeks, wrong layer</span></td></tr>
+            <tr class="verdict"><td>Verdict</td><td><span class="chip acc">Build the core here</span></td><td><span class="chip acc">Phase 6 front-end</span></td><td>Reject for this problem</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prose" style="margin-top:20px">
+        <h3>Why Revit is the wrong instrument, precisely</h3>
+        <p>Revit's <code>ElementTransformUtils.MirrorElements</code> already keeps <code>TextNote</code> and <code>Dimension</code> elements readable — mirroring in Revit is not a problem anyone needs to solve. An add-in only helps if the input is a model, and the input here is a flattened image. Bridging that gap means raster-to-vector conversion plus semantic wall recognition: a research project an order of magnitude larger than the one being scoped, and one whose output an architect would have to verify line by line anyway.</p>
+        <p>Keep it on the roadmap only as an <em>upstream</em> fix: if the plans originate in Revit, publish mirrored unit types from the model and the whole raster pipeline becomes unnecessary for that source.</p>
+
+        <h3>Why UXP is the right second phase, not the first</h3>
+        <p>UXP's value is not the algorithm, it is the handoff. A panel that receives placement JSON and creates genuine Photoshop text layers gives the team a PSD they can keep tuning — the exact thing a flattened PNG denies them. But UXP cannot run the detection itself, so it needs the Python core to exist first, reachable over <code>http://127.0.0.1:8731</code>. Build the brain, then bolt on the face.</p>
+      </div>
+
+      <div class="note caution">
+        <h4>One dependency choice worth making early</h4>
+        <p>PaddleOCR has the best out-of-the-box Latin accuracy but drags in <code>paddlepaddle</code>, which is painful to freeze on Windows. <strong>RapidOCR-ONNXRuntime</strong> ships the same PP-OCR models as ~50&nbsp;MB of ONNX, installs cleanly, and packages with PyInstaller. Develop against RapidOCR; keep a PaddleOCR adapter behind the same interface for accuracy comparisons.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 04 ---------- -->
+    <section id="logic">
+      <div class="sec-head">
+        <div class="eyebrow">04 &middot; core processing</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Route B in seven stages</h2>
+        <p class="lede">Each stage is independently testable and writes its intermediate to disk under <code>--debug</code>, because the failure you cannot see is the one that costs a day.</p>
+      </div>
+
+      <div class="stages">
+
+        <div class="stage">
+          <div class="tag">S1</div>
+          <div class="body">
+            <h3>Normalise the input</h3>
+            <p>Deskew, then guarantee enough resolution for OCR. Measure median glyph cap-height from connected components; if it is under 14&nbsp;px, upscale 2× with Lanczos and carry the scale factor through the whole pipeline so the final render happens at the higher resolution and downsamples once at export.</p>
+            <ul>
+              <li>Deskew by minimising the variance of horizontal projection profiles over ±3°, or from the dominant Hough line angle — CAD exports are usually already square, so cap the correction and log it.</li>
+              <li>Binarise with Otsu for the mask, but keep the original in colour: the render stage needs the true ink and paper values.</li>
+            </ul>
+            <div class="libs"><code>opencv-python</code><code>numpy</code><code>Pillow</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S2</div>
+          <div class="body">
+            <h3>Detect and read every text run</h3>
+            <p>Run OCR detection three times — on the image, and on it rotated +90° and −90° — then map every quad back to source coordinates and keep the highest-confidence claim per region. Recognition models are trained on horizontal lines and read rotated dimension text badly; the triple pass is what makes <code>5155</code> and <code>2105</code> reliable.</p>
+            <ul>
+              <li>Second pass for numerics only, with a digit-plus-comma whitelist, over boxes whose text matches <code>^[\d.,lOoISB]+$</code>. This kills the classic <code>5155&nbsp;→&nbsp;5l55</code> and <code>870&nbsp;→&nbsp;87O</code> substitutions.</li>
+              <li>Merge overlapping detections with NMS at IoU 0.3, then classify each run: <em>room label</em> (alphabetic, largest cap-height, centroid inside a room polygon), <em>dimension</em> (numeric, adjacent to a long thin line), <em>annotation</em> (short, mixed — <code>H*</code>, <code>WC</code>), <em>excluded</em> (inside a registered title-block or north-arrow region).</li>
+              <li>Room polygons come free: invert the binary image, remove components thinner than the wall thickness, and label the enclosed white regions.</li>
+            </ul>
+            <div class="libs"><code>rapidocr-onnxruntime</code><code>pytesseract (dan)</code><code>scipy.ndimage</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S3</div>
+          <div class="body">
+            <h3>Correct against a domain lexicon</h3>
+            <p>Danish plan vocabulary is a closed set of maybe sixty words. Fuzzy-match every alphabetic run against it and snap when the edit distance is 1 or 2, restoring the diacritics OCR almost always drops.</p>
+            <ul>
+              <li>Seed list: <code>Stue</code>, <code>Køkken</code>, <code>Værelse</code>, <code>Vær.</code>, <code>Bad</code>, <code>Toilet</code>, <code>Entré</code>, <code>Bryggers</code>, <code>Gang</code>, <code>Repos</code>, <code>Altan</code>, <code>Terrasse</code>, <code>Depot</code>, <code>Skab</code>, <code>Garderobe</code>, <code>Teknik</code>, <code>Loft</code>, <code>Kælder</code>, <code>Soveværelse</code>, <code>Opholdsrum</code>.</li>
+              <li><code>Kokken&nbsp;→&nbsp;Køkken</code> at distance 1; <code>Vaer. 1&nbsp;→&nbsp;Vær. 1</code>; <code>5tue&nbsp;→&nbsp;Stue</code>. Every snap is recorded in the sidecar with the raw OCR string beside it, so the review pane can show what changed.</li>
+              <li>Dimensions get a plausibility check instead: 3–5 digits, 200–20000&nbsp;mm, and — where two dimensions bracket the same wall run — a sum consistency warning.</li>
+            </ul>
+            <div class="libs"><code>rapidfuzz</code><code>unicodedata</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S4</div>
+          <div class="body">
+            <h3>Fit the type style</h3>
+            <p>To re-render invisibly you need four numbers per run, all measurable from the crop. Solve for them rather than guessing.</p>
+            <ul>
+              <li><strong>Ink and paper colour</strong> — median of the darkest and lightest deciles inside the box. Handles grey annotation text and tinted backgrounds without special cases.</li>
+              <li><strong>Font size</strong> — binary-search the point size until <code>ImageFont.getbbox()</code> cap-height matches the measured cap-height to within half a pixel.</li>
+              <li><strong>Tracking</strong> — solve <code>(observed_width − natural_width) / (n − 1)</code>. CAD text is frequently letter-spaced, and skipping this is what makes re-rendered labels look subtly wrong.</li>
+              <li><strong>Family</strong> — render the corrected string in each of a small candidate set and pick the highest normalised cross-correlation against the original crop. Candidates for CAD output: Arial, Helvetica, DIN&nbsp;1451, ISOCPEUR, Century Gothic, Calibri. Persist the winner per document and reuse it — a drawing almost never mixes families.</li>
+            </ul>
+            <div class="libs"><code>Pillow ImageFont</code><code>cv2.matchTemplate</code><code>fonttools</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S5</div>
+          <div class="body">
+            <h3>Erase the type and repair what it covered</h3>
+            <p>General inpainting is the wrong default here. Plan backgrounds are flat, so a background-colour fill is cleaner and faster than Telea — but linework passing under or beside a label must be reconstructed, or the mirrored plan sprouts gaps in its dimension lines.</p>
+            <ul>
+              <li>Mask = dilated text quads ∩ dark pixels, dilation 2–3&nbsp;px to catch antialiasing halos.</li>
+              <li>Fill each masked region with the modal colour of a 6&nbsp;px ring around it.</li>
+              <li><strong>Line repair:</strong> before erasing, detect long straight runs with morphological opening (kernels <code>(1,40)</code> and <code>(40,1)</code>) plus <code>HoughLinesP</code>. Any line whose endpoints straddle an erased region gets redrawn across it at its measured thickness. This is the step that separates a clean result from an obviously retouched one.</li>
+              <li>Fall back to <code>cv2.inpaint(..., INPAINT_TELEA, 3)</code> for text over hatch patterns or photographic fills, and flag those runs for review.</li>
+            </ul>
+            <div class="libs"><code>cv2.inpaint</code><code>cv2.HoughLinesP</code><code>cv2.morphologyEx</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S6</div>
+          <div class="body">
+            <h3>Flip the canvas</h3>
+            <p>The cheap step, and the one that must be provably lossless: <code>cv2.flip(clean, 1)</code> for a vertical mirror axis, <code>0</code> for horizontal, <code>-1</code> for 180°. Excluded regions — north arrow, scale bar, title block, logo — are lifted out first and re-composited afterwards at mirrored anchors without being flipped themselves.</p>
+            <div class="libs"><code>cv2.flip</code></div>
+          </div>
+        </div>
+
+        <div class="stage">
+          <div class="tag">S7</div>
+          <div class="body">
+            <h3>Re-render each run at its mirrored anchor</h3>
+            <p>Transform the anchor, normalise the angle for readability, render the string upright, then verify it fits. See §05 for the arithmetic.</p>
+            <ul>
+              <li>Anchor on the box <em>centre</em>, not a corner: the re-rendered string is never exactly the original's pixel width, and centre-anchoring keeps it visually where the drafter put it.</li>
+              <li><strong>Fit-to-box guard:</strong> after rendering to a transparent layer, measure the actual ink bounds. If they exceed the original by more than 4%, reduce tracking, then size, until they fit. Guarantees a label can never grow into a wall.</li>
+              <li><strong>Collision check:</strong> test the rendered alpha against the dark pixels of the flipped drawing. Any overlap is reported as a review item with a suggested nudge along the free axis.</li>
+              <li>Render at 4× and downsample for antialiasing that matches CAD output, or draw with Skia for correct subpixel positioning.</li>
+            </ul>
+            <div class="libs"><code>PIL.ImageDraw.text</code><code>skia-python (opt)</code></div>
+          </div>
+        </div>
+
+      </div>
+    </section>
+
+    <!-- ---------- 05 ---------- -->
+    <section id="math">
+      <div class="sec-head">
+        <div class="eyebrow">05 &middot; mirror mathematics</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Reflect the anchor, negate the angle, then restore readability</h2>
+        <p class="lede">Two of the three steps are obvious. The third is the one that decides whether a mirrored plan looks professionally drafted or merely un-backwards.</p>
+      </div>
+
+      <figure>
+        <div class="figbox">
+          <svg viewBox="0 0 740 268" role="img" aria-label="Three panels comparing a vertical dimension label. In the source, 5155 sits on the right edge reading bottom-to-top. Under a naive full-image flip it moves to the left edge but the glyphs are reversed and read top-to-bottom. In the corrected result it sits on the left edge, upright, still reading bottom-to-top.">
+            <!-- panel labels -->
+            <text class="m b muted" x="10" y="20" font-size="10.5" letter-spacing="1.2">SOURCE</text>
+            <text class="m b cau" x="260" y="20" font-size="10.5" letter-spacing="1.2">NAIVE FLIP</text>
+            <text class="m b acc" x="510" y="20" font-size="10.5" letter-spacing="1.2">SPEJL</text>
+
+            <!-- ===== panel 1: source ===== -->
+            <rect class="f-s2 s-rule" x="10" y="32" width="220" height="186" stroke-width="1"/>
+            <rect class="f-s s-poche" x="26" y="48" width="150" height="154" stroke-width="7"/>
+            <text x="101" y="130" text-anchor="middle" font-size="15">Stue</text>
+            <line x1="200" y1="52" x2="200" y2="198" stroke="currentColor" stroke-width="1"/>
+            <line x1="194" y1="52" x2="206" y2="52" stroke="currentColor" stroke-width="1.4"/>
+            <line x1="194" y1="198" x2="206" y2="198" stroke="currentColor" stroke-width="1.4"/>
+            <text class="m" transform="translate(214,125) rotate(-90)" text-anchor="middle" font-size="14">5155</text>
+
+            <!-- ===== panel 2: naive full-image flip ===== -->
+            <rect class="f-s2 s-rule" x="260" y="32" width="220" height="186" stroke-width="1"/>
+            <rect class="f-s s-poche" x="314" y="48" width="150" height="154" stroke-width="7"/>
+            <text class="cau" x="389" y="130" text-anchor="middle" font-size="15" transform="translate(778,0) scale(-1,1)">Stue</text>
+            <line x1="290" y1="52" x2="290" y2="198" stroke="currentColor" stroke-width="1"/>
+            <line x1="284" y1="52" x2="296" y2="52" stroke="currentColor" stroke-width="1.4"/>
+            <line x1="284" y1="198" x2="296" y2="198" stroke="currentColor" stroke-width="1.4"/>
+            <text class="m cau" transform="translate(276,125) rotate(-90) scale(-1,1)" text-anchor="middle" font-size="14">5155</text>
+            <text class="cau" x="370" y="240" text-anchor="middle" font-size="11.5">glyphs reversed &middot; reads top-down</text>
+
+            <!-- ===== panel 3: corrected ===== -->
+            <rect class="f-s2 s-rule" x="510" y="32" width="220" height="186" stroke-width="1"/>
+            <rect class="f-s s-poche" x="564" y="48" width="150" height="154" stroke-width="7"/>
+            <text x="639" y="130" text-anchor="middle" font-size="15">Stue</text>
+            <line x1="540" y1="52" x2="540" y2="198" stroke="currentColor" stroke-width="1"/>
+            <line x1="534" y1="52" x2="546" y2="52" stroke="currentColor" stroke-width="1.4"/>
+            <line x1="534" y1="198" x2="546" y2="198" stroke="currentColor" stroke-width="1.4"/>
+            <text class="m b acc" transform="translate(526,125) rotate(-90)" text-anchor="middle" font-size="14">5155</text>
+            <text class="acc" x="620" y="240" text-anchor="middle" font-size="11.5">upright &middot; still reads bottom-up</text>
+          </svg>
+        </div>
+        <figcaption><b>Figure 2.</b> The dimension line and the room both mirror correctly in all three panels — only the type differs. Note what the correct result does with the <em>angle</em>: reflecting 90° gives −90°, which would read top-to-bottom. ISO drafting practice requires vertical dimension text to read bottom-to-top, so the angle is normalised back to 90° after reflection. That normalisation, not the reflection, is the detail hand-retouching usually misses.</figcaption>
+      </figure>
+
+      <div class="math">
+        <div>
+          <code>x&prime; = W − 1 − x&nbsp;&nbsp;&nbsp;&nbsp;y&prime; = y</code>
+          <small>Reflection about the vertical axis of an image <em>W</em> pixels wide. A box <code>(x₁,y₁,x₂,y₂)</code> becomes <code>(W−1−x₂, y₁, W−1−x₁, y₂)</code> — the corners swap, so always recompute rather than mapping each corner in place.</small>
+        </div>
+        <div>
+          <code>c&prime;ₓ = W − 1 − cₓ</code>
+          <small>The anchor actually used. Centre-anchoring absorbs the small width difference between original and re-rendered glyphs.</small>
+        </div>
+        <div>
+          <code>θ&prime; = −θ</code>
+          <small>Baseline angle under reflection, measured counter-clockwise from +x. Reflection also inverts glyph handedness, which is exactly why the run is re-rendered rather than transformed.</small>
+        </div>
+        <div>
+          <code>θ&Prime; = θ&prime; + 180° &nbsp;while&nbsp; θ&prime; ∉ (−90°, 90°]</code>
+          <small>Readability normalisation. Horizontal text: 0° → 0°. Vertical dimension text: 90° → −90° → <strong>90°</strong>. Text at 30° → −30°, already readable, left alone. Applied to the angle only; the anchor never moves.</small>
+        </div>
+        <div>
+          <code>M<sub>page</sub> = (−1, 0, 0, 1, W, 0)</code>
+          <small>Route A equivalent — the PDF page CTM. Each text run is then re-emitted with <code>M<sub>run</sub> · M<sub>page</sub>⁻¹</code> applied to its own matrix, which cancels the reflection for glyphs while leaving vector geometry mirrored.</small>
+        </div>
+      </div>
+
+      <pre><i># transform/mirror.py — the load-bearing 20 lines</i>
+
+<b>def</b> mirror_run(run: TextRun, W: <b>int</b>) -> TextRun:
+    x1, y1, x2, y2 = run.bbox
+    bbox = (W - 1 - x2, y1, W - 1 - x1, y2)      <i># corners swap</i>
+    angle = -run.angle_deg                        <i># reflect the baseline</i>
+    <b>while</b> <b>not</b> (-90 &lt; angle &lt;= 90):              <i># ISO readability</i>
+        angle = (angle + 180) % 360
+        <b>if</b> angle &gt; 180: angle -= 360
+    <b>return</b> replace(run, bbox=bbox, angle_deg=angle,
+                   anchor=<u>center_of</u>(bbox))       <i># never a corner</i>
+</pre>
+    </section>
+
+    <!-- ---------- 06 ---------- -->
+    <section id="ui">
+      <div class="sec-head">
+        <div class="eyebrow">06 &middot; ui &amp; ux flow</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Three screens, and one of them is optional</h2>
+        <p class="lede">The drafter's mental model is "flip this sheet". Everything else the tool needs to ask should either have a sensible default or appear only when confidence is low.</p>
+      </div>
+
+      <div class="prose">
+        <h3>Screen 1 — Import</h3>
+        <p>A single window with a drop target and a file picker. Detected input format is shown as a badge (<code>Vector PDF — lossless</code> or <code>Raster PNG — reconstructed</code>) so the operator knows which route ran and how much to trust it. Controls, all with defaults:</p>
+        <ul>
+          <li><strong>Mirror axis</strong> — Vertical (default) / Horizontal / Both, with a live thumbnail.</li>
+          <li><strong>Language</strong> — Danish (default), from the lexicon set.</li>
+          <li><strong>Protect regions</strong> — a "mark north arrow / title block" mode that lets the operator drag rectangles the tool must not flip. Remembered per project so it is drawn once for a whole unit-type series.</li>
+          <li><strong>Output</strong> — PNG, PDF, or layered PSD; alongside the always-written JSON sidecar.</li>
+        </ul>
+
+        <h3>Screen 2 — Review</h3>
+        <p>Side-by-side synchronised pan and zoom: source left, result right. A <code>QGraphicsView</code> canvas over the result, with every re-rendered run as a selectable item. The review list is sorted by confidence ascending, so the two runs most likely to be wrong are the first things the operator sees rather than something they must hunt for.</p>
+        <ul>
+          <li>Click a run: inline edit of the string, size, tracking and angle; drag to nudge the anchor; arrow keys for pixel steps.</li>
+          <li><strong>Flags surfaced automatically</strong> — OCR confidence below 0.85, a lexicon snap that changed the string, a collision with linework, an implausible dimension value, a run whose fit-to-box guard had to shrink it.</li>
+          <li><kbd>Enter</kbd> accepts a run, <kbd>Tab</kbd> jumps to the next flagged one. A clean plan should be confirmable in under twenty seconds without touching the mouse.</li>
+        </ul>
+
+        <h3>Screen 3 — Batch</h3>
+        <p>Point at a folder, get a table: file, route taken, runs detected, flags raised, output path. Anything with zero flags is written straight out; anything flagged is queued for the review screen. This is where the time actually gets saved on a 40-unit project, and it is why the CLI must exist before the GUI.</p>
+      </div>
+
+      <pre><i># the CLI is the real interface; the GUI is a client of it</i>
+
+spejl mirror plan.png --axis v --lang da -o out/
+spejl mirror plans/ --axis v --batch --review-if-flagged --report qa.csv
+spejl mirror unit.pdf --axis v            <i># auto-routes to the lossless path</i>
+spejl inspect plan.png --debug out/stages <i># dumps every S1–S7 intermediate</i>
+</pre>
+    </section>
+
+    <!-- ---------- 07 ---------- -->
+    <section id="arch">
+      <div class="sec-head">
+        <div class="eyebrow">07 &middot; code architecture</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>One data structure carries the whole pipeline</h2>
+        <p class="lede">Every stage takes a list of <code>TextRun</code> and returns a list of <code>TextRun</code>. That makes each stage swappable, unit-testable against a fixture, and serialisable to the sidecar at any point.</p>
+      </div>
+
+      <pre><b>spejl/</b>
+├── <b>cli.py</b>              <i>Typer entry points: mirror, inspect, batch</i>
+├── <b>models.py</b>           <i>TextRun, TextStyle, Document, Flag — frozen dataclasses</i>
+├── <b>router.py</b>           <i>sniff format → choose Route A or B</i>
+├── <b>io/</b>
+│   ├── loaders.py       <i>png/jpg/tiff/pdf/svg, dpi + colour-profile handling</i>
+│   └── writers.py       <i>png, pdf, psd, .spejl.json sidecar</i>
+├── <b>vector/</b>
+│   └── pdf_mirror.py    <i>ROUTE A — page CTM flip + per-run counter-flip</i>
+├── <b>detect/</b>
+│   ├── ocr.py           <i>OcrBackend protocol; RapidOcr + Paddle + Tesseract impls</i>
+│   ├── rotations.py     <i>triple-pass detect, map-back, NMS merge</i>
+│   ├── rooms.py         <i>room polygons from inverted binary components</i>
+│   └── classify.py      <i>room | dimension | annotation | excluded</i>
+├── <b>lexicon/</b>
+│   ├── da_dk.json       <i>closed vocabulary + diacritic restoration</i>
+│   └── snap.py          <i>rapidfuzz match, records raw → corrected</i>
+├── <b>style/</b>
+│   ├── metrics.py       <i>ink/paper colour, cap-height, stroke weight</i>
+│   ├── fit_size.py      <i>binary-search size, solve tracking</i>
+│   └── family.py        <i>NCC template match over candidate fonts</i>
+├── <b>erase/</b>
+│   ├── mask.py          <i>dilated quads ∩ dark pixels</i>
+│   ├── fill.py          <i>modal-ring fill, Telea fallback</i>
+│   └── line_repair.py   <i>Hough + morphology reconstruction</i>
+├── <b>transform/</b>
+│   └── mirror.py        <i>flip raster; mirror_run(); angle normalisation</i>
+├── <b>render/</b>
+│   ├── text.py          <i>Pillow/Skia draw at angle, 4× supersample</i>
+│   ├── fit_box.py       <i>ink-bounds guard, shrink tracking then size</i>
+│   └── collide.py       <i>alpha ∩ linework → Flag + suggested nudge</i>
+├── <b>gui/</b>
+│   ├── import_dialog.py <i>Screen 1</i>
+│   ├── review.py        <i>Screen 2 — QGraphicsView, flag list</i>
+│   └── batch.py         <i>Screen 3</i>
+├── <b>server.py</b>           <i>optional localhost JSON API for the UXP panel</i>
+└── <b>qa/</b>
+    ├── golden/          <i>source + expected pairs, incl. the DK unit plan</i>
+    └── metrics.py       <i>char accuracy, box IoU, idempotency SSIM</i>
+</pre>
+
+      <pre><i># models.py — the contract every stage honours</i>
+
+<b>@dataclass</b>(frozen=<b>True</b>)
+<b>class</b> <u>TextStyle</u>:
+    family: <b>str</b>;  px_size: <b>float</b>;  tracking: <b>float</b>
+    ink: <b>tuple</b>[<b>int</b>,<b>int</b>,<b>int</b>];  paper: <b>tuple</b>[<b>int</b>,<b>int</b>,<b>int</b>];  weight: <b>int</b> = 400
+
+<b>@dataclass</b>(frozen=<b>True</b>)
+<b>class</b> <u>TextRun</u>:
+    id: <b>str</b>
+    text_raw: <b>str</b>                 <i># exactly what OCR returned</i>
+    text: <b>str</b>                     <i># after lexicon snap; what gets drawn</i>
+    quad: np.ndarray                <i># 4×2, source coordinates</i>
+    bbox: <b>tuple</b>[<b>int</b>,<b>int</b>,<b>int</b>,<b>int</b>]
+    anchor: <b>tuple</b>[<b>float</b>,<b>float</b>]
+    angle_deg: <b>float</b>
+    conf: <b>float</b>
+    kind: Literal[<i>"room"</i>,<i>"dimension"</i>,<i>"annotation"</i>,<i>"excluded"</i>,<i>"unknown"</i>]
+    style: TextStyle
+    flags: <b>tuple</b>[Flag, ...] = ()
+
+<i># every stage: (Document, list[TextRun]) -> (Document, list[TextRun])</i>
+Stage = Callable[[Document, <b>list</b>[TextRun]], <b>tuple</b>[Document, <b>list</b>[TextRun]]]
+</pre>
+
+      <div class="note">
+        <h4>Keep OCR behind a Protocol from the first commit</h4>
+        <p>You will change OCR engines at least once — accuracy on Danish diacritics, packaging weight, or licence terms will force it. A three-method <code>OcrBackend</code> protocol (<code>detect</code>, <code>recognise</code>, <code>detect_and_recognise</code>) makes that a one-file change instead of a rewrite, and lets the QA harness score two engines against the same goldens.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 08 ---------- -->
+    <section id="roadmap">
+      <div class="sec-head">
+        <div class="eyebrow">08 &middot; roadmap</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Sequenced so something useful ships on day three</h2>
+        <p class="lede">The phases are genuinely ordered — each one's exit criterion is the next one's precondition. Days are for one developer already fluent in OpenCV.</p>
+      </div>
+
+      <div class="tw" style="margin-top:20px">
+        <table>
+          <thead><tr><th class="num">Phase</th><th class="num">Days</th><th>Deliverable</th><th>Exit criterion</th></tr></thead>
+          <tbody>
+            <tr><td class="num rowlab">P0</td><td class="num">0.5</td><td>Repo, <code>pyproject.toml</code>, <code>models.py</code>, golden fixtures — the existing source/mirrored pair becomes fixture #1</td><td><code>pytest</code> runs green on an empty suite; QA harness can load a golden pair</td></tr>
+            <tr><td class="num rowlab">P1</td><td class="num">2</td><td><strong>Route A</strong> — vector PDF/SVG mirroring, plus the format router and CLI skeleton</td><td>A CAD-exported PDF mirrors with byte-identical glyph runs; text selectable and correct in a PDF viewer</td></tr>
+            <tr><td class="num rowlab">P2</td><td class="num">3</td><td><strong>Route B v1</strong> — S1, S2, S5 (flat fill only), S6, S7. CLI, no GUI</td><td>The golden PNG mirrors with all 12 labels readable and within 3&nbsp;px of expected anchors</td></tr>
+            <tr><td class="num rowlab">P3</td><td class="num">2</td><td>Accuracy pass — lexicon snap, numeric second pass, classification, style fitting, line repair</td><td>Character accuracy ≥ 99% on goldens; diacritics correct; no visible erase scars at 100% zoom</td></tr>
+            <tr><td class="num rowlab">P4</td><td class="num">3</td><td>PySide6 GUI — import, review canvas with flag list, batch table</td><td>A drafter unfamiliar with the tool mirrors and confirms a plan unaided in under 60&nbsp;s</td></tr>
+            <tr><td class="num rowlab">P5</td><td class="num">2</td><td>Hardening — protected regions, PSD/PDF export, PyInstaller build, QA report CSV</td><td>Signed <code>spejl.exe</code> runs on a clean Win 11 machine with no Python installed</td></tr>
+            <tr><td class="num rowlab">P6</td><td class="num">3</td><td><em>Optional</em> — UXP panel over <code>server.py</code>, creating real Photoshop text layers</td><td>Panel returns a layered PSD whose text layers are live and editable in Photoshop</td></tr>
+            <tr class="verdict"><td class="num">—</td><td class="num">12.5&nbsp;+&nbsp;3</td><td>Core tool, plus the optional Photoshop front-end</td><td>Manual mirroring retired for both vector and raster sources</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note">
+        <h4>Cut line, if the schedule tightens</h4>
+        <p>P1 + P2 + P3 is a complete, genuinely useful CLI tool at 7.5 days. The GUI is what makes it adoptable by the whole team, not what makes it work — so if something has to slip, slip P4 and drive it from a watched folder in the meantime.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 09 ---------- -->
+    <section id="edges">
+      <div class="sec-head">
+        <div class="eyebrow">09 &middot; edge cases</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>What will actually break, and what to do about it</h2>
+        <p class="lede">Ordered by how much damage each does if it ships unhandled. The first three are the ones that turn a good demo into a rejected tool.</p>
+      </div>
+
+      <div class="tw" style="margin-top:20px">
+        <table>
+          <thead><tr><th>Case</th><th>Failure</th><th>Mitigation</th><th>Severity</th></tr></thead>
+          <tbody>
+            <tr><td class="rowlab">North arrow, scale bar, title block, logo</td><td>Mirrored — the drawing now makes a false claim about orientation or the firm's identity</td><td>Protected-region list, drawn once per project and stored; template-match a small library of common north-arrow glyphs; lift, mirror the anchor only, re-composite</td><td><span class="chip no">Critical</span></td></tr>
+            <tr><td class="rowlab">Danish diacritics — Ø&nbsp;Æ&nbsp;Å</td><td><code>Køkken → Kokken</code>; the plan reads as sloppy to any Danish-speaking client</td><td>Lexicon snap (S3) plus a Latin-Extended recognition model; every snap logged and shown in review</td><td><span class="chip no">Critical</span></td></tr>
+            <tr><td class="rowlab">Rotated dimension text</td><td>Reads top-to-bottom after mirroring, violating ISO practice</td><td>Angle normalisation to (−90°, 90°]; triple-pass detection so vertical runs are found at all</td><td><span class="chip no">Critical</span></td></tr>
+            <tr><td class="rowlab">Text touching or crossing linework</td><td>Erase mask removes part of a wall or dimension line; gaps appear in the mirrored plan</td><td>Line repair in S5 — detect long runs before erasing, redraw across the hole at measured thickness</td><td><span class="chip mid">High</span></td></tr>
+            <tr><td class="rowlab">Unknown or unavailable font</td><td>Re-rendered labels are visibly a different typeface from the untouched parts of the sheet</td><td>NCC family match over a candidate set; per-document font lock; ship DIN&nbsp;1451 and a metric-compatible Arial substitute; surface the choice in review</td><td><span class="chip mid">High</span></td></tr>
+            <tr><td class="rowlab">Low resolution — cap-height &lt; 14&nbsp;px</td><td>OCR confidence collapses; 3s and 8s and 5s become interchangeable</td><td>2× Lanczos upscale before OCR, render at the upscaled size, single downsample at export; refuse below 8&nbsp;px with a clear message</td><td><span class="chip mid">High</span></td></tr>
+            <tr><td class="rowlab">Multi-line labels — <code>Vær.&nbsp;1</code> over an area figure</td><td>Split into two runs and re-centred independently; the pair drifts apart</td><td>Group runs whose horizontal overlap &gt; 60% and vertical gap &lt; 1.6 × cap-height into one block; mirror and render the block, preserving internal leading and alignment</td><td><span class="chip mid">Medium</span></td></tr>
+            <tr><td class="rowlab">Area figures — <code>12,4&nbsp;m²</code></td><td>Comma decimal separator and superscript ² mis-read or dropped</td><td>Dedicated regex and a superscript-aware render path; validate against the room polygon's pixel area × scale as a sanity check</td><td><span class="chip mid">Medium</span></td></tr>
+            <tr><td class="rowlab">Annotation symbols — <code>H*</code>, <code>WC</code></td><td>Treated as a room label and re-centred away from the fixture it annotates</td><td>Classify as <em>annotation</em>: mirror the anchor exactly, no re-centring, no fit adjustment; flag if confidence is low</td><td><span class="chip mid">Medium</span></td></tr>
+            <tr><td class="rowlab">JPEG artefacts</td><td>Ringing around glyphs corrupts both the mask and the colour estimate; erase leaves grey halos</td><td>Mild bilateral filter before masking; widen dilation to 4&nbsp;px; mark the document as reconstructed-with-low-confidence in the sidecar</td><td><span class="chip mid">Medium</span></td></tr>
+            <tr><td class="rowlab">Text over hatch or grey fill</td><td>Modal-ring fill produces a flat patch where a pattern should continue</td><td>Detect pattern variance in the ring; switch that region to Telea inpainting and flag it for visual review</td><td><span class="chip ok">Low</span></td></tr>
+            <tr><td class="rowlab">Stair direction arrows and "UP" text</td><td>Direction mirrors correctly but the label may end up on the wrong tread</td><td>Correct by default for a true unit mirror; flag any run whose text matches a direction vocabulary so a human confirms</td><td><span class="chip ok">Low</span></td></tr>
+            <tr><td class="rowlab">Double mirroring</td><td>Drift accumulates and the result no longer matches the original</td><td>Idempotency test in the QA harness: mirror twice, require SSIM ≥ 0.99 against the source</td><td><span class="chip ok">Low</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="note caution">
+        <h4>A mirrored plan is a drafting aid, not a validated design</h4>
+        <p>Reflecting a unit can quietly break things a pixel pipeline cannot know about: accessible clearance beside a WC, door approach distances, riser and shaft positions, egress direction. Write <code>"source": …, "axis": …, "generated": …, "route": …</code> into every sidecar, and offer an optional <strong>MIRRORED — NOT FOR CONSTRUCTION</strong> stamp on the export. Cheap to add now, and it keeps a convenience tool from being mistaken for a compliance one.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 10 ---------- -->
+    <section id="qa">
+      <div class="sec-head">
+        <div class="eyebrow">10 &middot; acceptance</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Five numbers decide whether it works</h2>
+        <p class="lede">The team already has a hand-made source/mirrored pair of the two-room unit plan. That pair is fixture #1, and it turns "looks right" into a threshold a build can pass or fail in CI.</p>
+      </div>
+
+      <div class="tw" style="margin-top:20px">
+        <table>
+          <thead><tr><th>Metric</th><th>How it is measured</th><th class="num">Gate</th></tr></thead>
+          <tbody>
+            <tr><td class="rowlab">Text recall</td><td>Runs detected ÷ runs annotated in the golden. The sample plan has 12: six room labels and nine dimensions, with <code>H*</code> as a thirteenth annotation</td><td class="num">≥ 100%</td></tr>
+            <tr><td class="rowlab">Character accuracy</td><td>Levenshtein against annotated strings, after lexicon snap, diacritics counted strictly</td><td class="num">≥ 99%</td></tr>
+            <tr><td class="rowlab">Anchor error</td><td>Euclidean distance from each run's rendered centre to its expected mirrored centre</td><td class="num">≤ 3 px</td></tr>
+            <tr><td class="rowlab">Geometry integrity</td><td>SSIM of the non-text regions against a plain <code>cv2.flip</code> of the source. Proves the pipeline touched nothing it should not have</td><td class="num">≥ 0.995</td></tr>
+            <tr><td class="rowlab">Idempotency</td><td>SSIM of mirror(mirror(x)) against x</td><td class="num">≥ 0.99</td></tr>
+          </tbody>
+        </table>
+      </div>
+
+      <div class="prose" style="margin-top:20px">
+        <p>Two qualitative gates sit alongside the numbers, and neither can be automated away:</p>
+        <ul>
+          <li><strong>The zoom test.</strong> At 100% zoom, a drafter who did not run the tool cannot point to which labels were re-rendered. Erase scars and font mismatches both fail here, and both pass every metric above.</li>
+          <li><strong>The unaided test.</strong> A colleague with no briefing mirrors a plan and confirms the result in under a minute. If they hesitate over the review screen, the flag ordering is wrong, not the operator.</li>
+        </ul>
+        <p>Grow the golden set to roughly fifteen fixtures across the real variation the office sees: vector and raster, 150 and 300 dpi, Danish and English labels, a sheet with a title block and north arrow, one JPEG, one screenshot, one plan with area figures, and one deliberately awful scan that the tool is expected to <em>refuse</em> rather than mangle. Refusal is a passing outcome and should be tested as one.</p>
+      </div>
+    </section>
+
+    <!-- ---------- 11 ---------- -->
+    <section id="setup">
+      <div class="sec-head">
+        <div class="eyebrow">11 &middot; environment</div>
+        <svg class="dimline" viewBox="0 0 1000 9" preserveAspectRatio="none" aria-hidden="true"><line x1="1" y1="4.5" x2="999" y2="4.5" stroke="currentColor" stroke-width="1"/><line x1="1" y1="0" x2="1" y2="9" stroke="currentColor" stroke-width="1.5"/><line x1="999" y1="0" x2="999" y2="9" stroke="currentColor" stroke-width="1.5"/></svg>
+        <h2>Day-zero setup</h2>
+        <p class="lede">This machine has no Python — the Store alias is a stub — and the project folder is empty. Install a real interpreter first; the Store build's sandboxed paths cause trouble with ONNX model caches and PyInstaller.</p>
+      </div>
+
+      <pre><i># 1. real CPython, not the Microsoft Store alias</i>
+winget install Python.Python.3.12
+
+<i># 2. project</i>
+py -3.12 -m venv .venv
+.venv\Scripts\Activate.ps1
+python -m pip install -U pip
+
+<i># 3. core</i>
+pip install opencv-python numpy pillow
+pip install rapidocr-onnxruntime      <i># ~50 MB ONNX, freezes cleanly</i>
+pip install pymupdf                   <i># Route A: vector PDF path</i>
+pip install rapidfuzz scipy typer     <i># lexicon snap, rooms, CLI</i>
+pip install PySide6                   <i># P4 GUI, LGPL</i>
+
+<i># 4. dev</i>
+pip install pytest scikit-image ruff mypy pyinstaller
+
+<i># optional / comparison</i>
+pip install skia-python               <i># subpixel text placement</i>
+pip install pytesseract               <i># needs tesseract.exe + dan.traineddata</i>
+</pre>
+
+      <div class="prose" style="margin-top:18px">
+        <h3>Two licence notes worth checking before P5</h3>
+        <ul>
+          <li><strong>PyMuPDF is AGPL-3.0</strong> unless commercially licensed. Fine for an internal tool the office never distributes; a blocker the moment it ships to a client. <code>pypdfium2</code> (BSD/Apache) is the swap, with a slightly rougher text API.</li>
+          <li><strong>Bundled fonts</strong> need redistribution rights in the frozen exe. DIN&nbsp;1451 has free variants; Arial does not — use a metric-compatible substitute such as Liberation Sans rather than copying <code>arial.ttf</code> into the build.</li>
+        </ul>
+      </div>
+    </section>
+
+    <footer>
+      <p><strong>Spejl</strong> — technical blueprint for automated readable-text plan mirroring. Golden fixture: Danish two-room unit plan, 2900 / 3200 / 4045 / 5155 / 4060 / 2105 / 1680 / 1400 / 870&nbsp;mm.</p>
+      <p>Next decision to make, before any code: confirm whether the office's PNG plans have a surviving vector PDF or Revit source. If they do, Route A alone retires most of the manual work at full fidelity.</p>
+    </footer>
+
+  </main>
+</div>
