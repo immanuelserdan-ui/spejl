@@ -162,6 +162,17 @@ def _merge(
     * **Containment suppresses.** A detection mostly inside an already
       kept run is a fragment of it, never a new run — see
       :func:`_containment`.
+
+    A candidate overlapping *more than one* already-kept run is handled
+    as neither of the above: it is rejected outright, never used to
+    replace anything. Two adjacent real dimensions ('600', '300') kept
+    separately, followed by a merged rotated-pass misread spanning both
+    ('600300'), overlaps both — replacing only the longer-text incumbent
+    would drop '600' from the output while leaving '300' beside a bogus
+    '600300', a duplicate exactly like this NMS pass exists to prevent.
+    Single-run truncation correction (the designed case, e.g. '105' ->
+    '2105') only ever has one overlapping incumbent, so this leaves that
+    path unchanged.
     """
     ordered = sorted(candidates, key=lambda d: (d.conf, len(d.text)), reverse=True)
     kept: list[Detection] = []
@@ -175,9 +186,9 @@ def _merge(
         if not overlapping:
             kept.append(cand)
             continue
-        # Same region already claimed. Replace the incumbent only if this
-        # candidate reads *more* characters at comparable confidence.
-        best = max(overlapping, key=lambda k: len(k.text))
+        if len(overlapping) > 1:
+            continue  # spans multiple real runs — a merged misread, drop it
+        best = overlapping[0]
         if len(cand.text) > len(best.text) and cand.conf > best.conf - 0.05:
             kept.remove(best)
             kept.append(cand)

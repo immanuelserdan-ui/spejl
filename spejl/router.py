@@ -28,10 +28,19 @@ def sniff_route(path: Path) -> Route:
 
     # Extension-less or unfamiliar: fall back to magic bytes.
     with open(path, "rb") as f:
-        head = f.read(8)
-    if head.startswith(b"%PDF-"):
+        # ISO 32000 permits the %PDF- header anywhere in the first 1024
+        # bytes (to tolerate leading junk some generators/transports
+        # prepend), not only at offset 0.
+        head = f.read(1024)
+    if b"%PDF-" in head:
         return Route.VECTOR
-    if head.startswith(b"\x89PNG") or head.startswith(b"\xff\xd8"):
+    if (
+        head.startswith(b"\x89PNG")
+        or head.startswith(b"\xff\xd8")
+        or head.startswith(b"II*\x00")  # TIFF, little-endian
+        or head.startswith(b"MM\x00*")  # TIFF, big-endian
+        or head.startswith(b"BM")  # BMP
+    ):
         return Route.RASTER
 
     raise ValueError(

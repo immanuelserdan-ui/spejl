@@ -34,7 +34,12 @@ def mirror(
     axis: Axis = typer.Option(Axis.VERTICAL, "--axis", help="v = left/right, h = top/bottom, both = 180°."),
 ) -> None:
     """Mirror a floor plan without mirroring its text."""
-    route = sniff_route(input_path)
+    try:
+        route = sniff_route(input_path)
+    except ValueError as exc:  # unrecognised format — an existing file we
+        # still can't route (bad extension, magic bytes match nothing)
+        typer.secho(str(exc), fg=typer.colors.RED)
+        raise typer.Exit(code=1) from exc
 
     if output is None:
         output = input_path.with_name(f"{input_path.stem}_mirrored{input_path.suffix}")

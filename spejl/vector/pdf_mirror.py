@@ -17,9 +17,17 @@ route that supports a true left-right or top-bottom mirror.
 
 Known P1 limitations, both flagged in the sidecar rather than silently
 swallowed:
-    * embedded raster images are left in place, unmirrored (§09 "text
-      over hatch or grey fill" territory — real handling needs the same
-      erase/flip treatment as Route B and is deferred to Phase 3+);
+    * embedded raster images are DROPPED, not mirrored — geometry and
+      text are reconstructed on a fresh page, and nothing in this module
+      ever copies image XObjects onto it. Correct handling means judging
+      per image whether its pixels should flip too (a hatch fill,
+      probably; a scanned stamp or logo, probably not — the same
+      protected-region judgement call Route B makes explicitly) and this
+      codebase has no PDF fixture with an embedded image to develop or
+      verify that against yet. Tracked as real follow-up work, not
+      silently patched over: the sidecar flag says "removed", not
+      "unmirrored", so nobody mistakes a dropped image for a mirrored
+      one on a plan that happens to have one;
     * diagonal text is rounded to the nearest 90° on re-insertion,
       because ``Page.insert_text`` only rotates in quarter turns. Every
       dimension label and room name in the target plans is horizontal
@@ -60,9 +68,14 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
     ``to_sidecar()`` turns into the ``*.spejl.json`` written beside the
     output.
     """
-    src = pymupdf.open(str(input_path))
-    out = pymupdf.open()
     result = Document(source=input_path, output=output_path, axis=axis, route=Route.VECTOR)
+
+    src = pymupdf.open(str(input_path))
+    try:
+        out = pymupdf.open()
+    except Exception:
+        src.close()  # opening `out` failing must not leak the already-open `src`
+        raise
 
     try:
         for page_index in range(src.page_count):
@@ -84,9 +97,9 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
             if page.get_images():
                 flags.append(
                     Flag(
-                        code="image-not-mirrored",
-                        message="Page contains embedded raster image(s); left "
-                        "unmirrored — see module docstring.",
+                        code="image-removed",
+                        message="Page contains embedded raster image(s); these "
+                        "are REMOVED, not mirrored — see module docstring.",
                         severity="warn",
                     )
                 )
@@ -249,8 +262,30 @@ def _draw_mirrored_path(shape, dwg: dict, W: float, H: float, axis: Axis) -> Non
         # a whole-document mirror.
 
     line_cap = dwg.get("lineCap")
+    # PDF/CAD convention: an explicit stroke width of 0 means "hairline —
+    # thinnest the device can render". `dwg.get("width") or 1.0` treats
+    # that 0 as falsy and silently thickens every hairline wall/gridline
+    # (what DWG->PDF exporters commonly use) to a full 1pt stroke.
+    #
+    # The fix is not simply "pass 0 through", though: PyMuPDF's own
+    # Shape.finish() gives `width=0` a THIRD, different meaning again —
+    # its source sets `color = None` whenever `width == 0` ("border
+    # color makes no sense then"), which suppresses the stroke operator
+    # entirely, so the line would vanish rather than render thin. A
+    # small positive width is the only value that survives PyMuPDF's own
+    # writer as a visibly hairline-thin *stroke*, which is what "0 w" in
+    # the source actually meant. Only a genuinely missing key (None)
+    # falls back to the ordinary default.
+    _HAIRLINE_PT = 0.1
+    dwg_width = dwg.get("width")
+    if dwg_width is None:
+        resolved_width = 1.0
+    elif dwg_width == 0:
+        resolved_width = _HAIRLINE_PT
+    else:
+        resolved_width = dwg_width
     shape.finish(
-        width=dwg.get("width") or 1.0,
+        width=resolved_width,
         color=dwg.get("color"),
         fill=dwg.get("fill"),
         lineCap=line_cap[0] if isinstance(line_cap, tuple) else (line_cap or 0),

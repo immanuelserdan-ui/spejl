@@ -56,55 +56,108 @@ def build_text_mask(
     with the box (rather than filling the rectangle outright) keeps the
     erase from wiping a wall edge that merely passes through a corner —
     and what it does catch of the linework, line repair puts back.
+
+    Every OTHER box's pixels are excluded from a box's own paper sample.
+    Real plans crowd runs a few pixels apart (a room's number beside its
+    door-swing radius label, e.g. 'Bad' next to '1400') — close enough
+    that their dilated rectangles overlap. Without this exclusion, a
+    neighbour's dark ink counted toward *this* box's 90th-percentile
+    "paper" estimate, dragging it down until the neighbour's own light
+    antialiased fringe read as paper and survived the fill — a visible
+    grey ghost of both labels, confirmed on this exact 'Bad'/'1400'
+    cluster in the golden fixture.
     """
     gray = _luma(image)
     h, w = gray.shape[:2]
     mask = np.zeros((h, w), dtype=np.uint8)
 
+    rects: list[tuple[int, int, int, int]] = []
     for x0, y0, x1, y1 in boxes:
-        bx0 = max(0, int(np.floor(x0)) - dilate_px)
-        by0 = max(0, int(np.floor(y0)) - dilate_px)
-        bx1 = min(w, int(np.ceil(x1)) + dilate_px)
-        by1 = min(h, int(np.ceil(y1)) + dilate_px)
+        rects.append(
+            (
+                max(0, int(np.floor(x0)) - dilate_px),
+                max(0, int(np.floor(y0)) - dilate_px),
+                min(w, int(np.ceil(x1)) + dilate_px),
+                min(h, int(np.ceil(y1)) + dilate_px),
+            )
+        )
+
+    for i, (bx0, by0, bx1, by1) in enumerate(rects):
         if bx1 <= bx0 or by1 <= by0:
             continue
         patch = gray[by0:by1, bx0:bx1]
+
+        exclude = np.zeros(patch.shape, dtype=bool)
+        for j, (ox0, oy0, ox1, oy1) in enumerate(rects):
+            if j == i:
+                continue
+            ix0, iy0 = max(ox0, bx0), max(oy0, by0)
+            ix1, iy1 = min(ox1, bx1), min(oy1, by1)
+            if ix1 > ix0 and iy1 > iy0:
+                exclude[iy0 - by0 : iy1 - by0, ix0 - bx0 : ix1 - bx0] = True
+
+        sample = patch[~exclude] if exclude.any() else patch
+        if sample.size == 0:  # neighbours claimed the whole patch — fall back
+            sample = patch
+
         # Local paper = the light end of this patch, not its mean: a box
         # containing mostly ink would otherwise set a paper level so low
         # that nothing gets erased.
-        paper = float(np.percentile(patch, 90))
+        paper = float(np.percentile(sample, 90))
         mask[by0:by1, bx0:bx1] |= (patch < paper - PAPER_TOLERANCE).astype(np.uint8) * 255
 
     return mask
 
 
-def _ring_modal_colour(
-    image: np.ndarray, box: tuple[int, int, int, int], ring_px: int = 6
+def _ring_pixels(
+    image: np.ndarray, box: tuple[int, int, int, int], ring_px: int
 ) -> np.ndarray:
-    """The dominant colour immediately around a box — the local paper."""
+    """Pixels in a ``ring_px``-wide band around ``box``, box interior
+    excluded — the shared "just the surround" sampling both
+    :func:`_ring_modal_colour` and :func:`_looks_patterned` need.
+    """
     h, w = image.shape[:2]
     x0, y0, x1, y1 = box
     ox0, oy0 = max(0, x0 - ring_px), max(0, y0 - ring_px)
     ox1, oy1 = min(w, x1 + ring_px), min(h, y1 + ring_px)
     outer = image[oy0:oy1, ox0:ox1]
     if outer.size == 0:
-        return np.array([255, 255, 255], dtype=np.uint8)
+        return outer
 
     ring = np.ones(outer.shape[:2], dtype=bool)
     ix0, iy0 = x0 - ox0, y0 - oy0
     ix1, iy1 = ix0 + (x1 - x0), iy0 + (y1 - y0)
     ring[max(0, iy0):max(0, iy1), max(0, ix0):max(0, ix1)] = False
-    pixels = outer[ring]
+    return outer[ring]
+
+
+def _ring_modal_colour(
+    image: np.ndarray, box: tuple[int, int, int, int], ring_px: int = 6
+) -> np.ndarray:
+    """The dominant colour immediately around a box — the local paper."""
+    pixels = _ring_pixels(image, box, ring_px)
     if pixels.size == 0:
         return np.array([255, 255, 255], dtype=np.uint8)
 
     # Modal, not mean: a ring that clips a black wall would otherwise
-    # produce grey paper.
+    # produce grey paper. But the modal *bucket* found by quantising is
+    # not itself a colour to fill with — `255 // 8 * 8 == 248`, so a
+    # ring that is 100% pure white used to return (248,248,248) as
+    # "paper", every single time (the floor of the bucket, never the
+    # actual value). That is not a rare edge case: it silently
+    # darkened EVERY erase fill on EVERY run by the same ~3%, visible at
+    # zoom as a faint ghost with the exact silhouette of whatever was
+    # erased — confirmed on the 'Bad'/'1400' cluster in the golden
+    # fixture. The bucket only identifies *which* pixels are the
+    # majority; the colour returned must be their own true average.
     if pixels.ndim == 1:
         pixels = pixels.reshape(-1, 1)
     quantised = (pixels // 8 * 8).astype(np.uint8)
     colours, counts = np.unique(quantised, axis=0, return_counts=True)
-    return colours[int(np.argmax(counts))]
+    winning_bucket = colours[int(np.argmax(counts))]
+    in_bucket = np.all(quantised == winning_bucket, axis=1)
+    true_colour = pixels[in_bucket].astype(np.float32).mean(axis=0)
+    return np.round(true_colour).astype(np.uint8)
 
 
 def line_pixel_mask(image: np.ndarray, min_length: int = 40) -> np.ndarray:
@@ -184,15 +237,22 @@ def erase_text(
 
 
 def _looks_patterned(image: np.ndarray, box: tuple[int, int, int, int], ring_px: int = 6) -> bool:
-    """Is the surround varied enough that a flat fill will show?"""
-    h, w = image.shape[:2]
-    x0, y0, x1, y1 = box
-    ox0, oy0 = max(0, x0 - ring_px), max(0, y0 - ring_px)
-    ox1, oy1 = min(w, x1 + ring_px), min(h, y1 + ring_px)
-    outer = image[oy0:oy1, ox0:ox1]
-    if outer.size == 0:
+    """Is the surround varied enough that a flat fill will show?
+
+    Deliberately reuses :func:`_ring_pixels` rather than sampling
+    ``box``'s own rectangle plus its ring: this runs *after* the box
+    interior has already been flat-filled (see ``erase_text``), and for
+    any normal-width text run that flat interior dwarfs the thin 6px
+    ring of real surrounding texture — which drags the measured
+    variance toward zero regardless of how patterned the surround
+    actually is, and the warning this function exists to raise never
+    fires. Sampling only the ring is what the docstring ("the surround")
+    already promised.
+    """
+    pixels = _ring_pixels(image, box, ring_px)
+    if pixels.size == 0:
         return False
-    gray = cv2.cvtColor(outer, cv2.COLOR_BGR2GRAY) if outer.ndim == 3 else outer
+    gray = cv2.cvtColor(pixels.reshape(-1, 1, 3), cv2.COLOR_BGR2GRAY) if pixels.ndim == 2 else pixels
     light = gray[gray > 128]
     return bool(light.size > 0 and light.std() > 18)
 

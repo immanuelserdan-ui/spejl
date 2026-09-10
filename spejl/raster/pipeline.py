@@ -102,17 +102,26 @@ def mirror_raster(
     # ---- S2: detect -------------------------------------------------------
     detections = detect_all_orientations(image, backend)
     upscale = _upscale_factor(detections)
+    protected = protected or []
     if upscale != 1.0:
         image = cv2.resize(
             image, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_LANCZOS4
         )
         detections = detect_all_orientations(image, backend)
+        # `protected` regions arrive in the ORIGINAL image's coordinates —
+        # the only space the caller can have known before this function
+        # decided (internally) to upscale. Every detection and the image
+        # itself just moved into upscaled-pixel space; `protected` must
+        # follow, or a north arrow at the edge of its region silently
+        # stops being recognised as protected and gets erased and
+        # re-rendered as ordinary text — exactly the "mirrored north
+        # arrow" correctness bug this whole feature exists to prevent.
+        protected = [tuple(v * upscale for v in region) for region in protected]
         flags.append(
             Flag("upscaled", f"Sheet upscaled {upscale:g}x before OCR (small type).", "info")
         )
 
     h, w = image.shape[:2]
-    protected = protected or []
 
     # ---- S3 + S4: correct the strings, measure the type -------------------
     runs: list[MirroredRun] = []
@@ -166,19 +175,40 @@ def mirror_raster(
     # ---- S7: re-render every run upright at its mirrored anchor -----------
     lines = linework_mask_for(flipped, flipped_text_mask)
     for run in runs:
+        run_target_size = _target_size(run)
+        target_along = run_target_size[0]
         rendered = render_run(
             canvas=flipped,
             text=run.text,
             center=run.center_out,
             angle_deg=run.angle_out,
             style=run.style,
-            target_size=_target_size(run),
+            target_size=run_target_size,
             linework_mask=lines,
         )
         if rendered.shrunk:
-            run.flags.append(
-                Flag("fit-shrunk", f"{run.text!r} reduced to fit its original box.", "info")
-            )
+            # The shrink-to-fit loop runs a bounded number of attempts
+            # (render/text.py) and can legitimately give up still over
+            # target — most often a lexicon-corrected string is longer
+            # than the raw OCR read it replaced ('Vaer.' -> 'Værelse').
+            # A silent "fit-shrunk" info flag looked identical whether
+            # the loop converged to a 1% overshoot or gave up at 25% —
+            # the second case is worth a human's attention, the first
+            # is not, so the flag now says which one happened.
+            overflow = rendered.ink_width / max(1.0, target_along)
+            if overflow > 1.15:
+                run.flags.append(
+                    Flag(
+                        "fit-shrink-incomplete",
+                        f"{run.text!r} is still {overflow:.0%} of its original width "
+                        "after the shrink-to-fit limit — may overlap neighbouring content.",
+                        "warn",
+                    )
+                )
+            else:
+                run.flags.append(
+                    Flag("fit-shrunk", f"{run.text!r} reduced to fit its original box.", "info")
+                )
         if rendered.collided:
             run.flags.append(
                 Flag("collision", f"{run.text!r} overlaps linework after mirroring.", "warn")
@@ -230,14 +260,36 @@ def _replace_unmirrored(
     h: float,
     axis: Axis,
 ) -> None:
-    """Paste a protected region unflipped, at its mirrored position."""
+    """Paste a protected region unflipped, at its mirrored position.
+
+    Both ends are clamped into bounds before slicing — the destination
+    as carefully as the source already was. A region near the mirrored
+    edge of the sheet can put a raw ``dx0`` below 0 (e.g. a box that
+    extended past the source's right edge mirrors to one that starts
+    left of the canvas's left edge); Python/numpy slicing treats a
+    negative start as counting from the *end* of the array rather than
+    clipping to it, so an unclamped ``canvas[dy0:dy1, -50:-20]`` silently
+    pastes the patch near the opposite edge of the image instead of
+    raising or clipping — corruption with no exception and no flag.
+    """
     sx0, sy0, sx1, sy1 = (int(round(v)) for v in region)
-    patch = source[max(0, sy0):sy1, max(0, sx0):sx1]
-    if patch.size == 0:
+    sx0, sy0 = max(0, sx0), max(0, sy0)
+    sx1, sy1 = min(source.shape[1], sx1), min(source.shape[0], sy1)
+    if sx1 <= sx0 or sy1 <= sy0:
         return
+    patch = source[sy0:sy1, sx0:sx1]
+
     dx0, dy0, dx1, dy1 = (int(round(v)) for v in M.mirror_bbox(region, w, h, axis))
-    dy1 = min(canvas.shape[0], dy0 + patch.shape[0])
-    dx1 = min(canvas.shape[1], dx0 + patch.shape[1])
-    if dx1 <= dx0 or dy1 <= dy0:
+    # Clip the destination to the canvas FIRST, then shrink the patch by
+    # exactly what was clipped off each side — this is what keeps a
+    # region that runs off one edge from wrapping onto the other.
+    clip_left = max(0, -dx0)
+    clip_top = max(0, -dy0)
+    cdx0, cdy0 = max(0, dx0), max(0, dy0)
+    cdx1 = min(canvas.shape[1], dx0 + patch.shape[1])
+    cdy1 = min(canvas.shape[0], dy0 + patch.shape[0])
+    if cdx1 <= cdx0 or cdy1 <= cdy0:
         return
-    canvas[dy0:dy1, dx0:dx1] = patch[: dy1 - dy0, : dx1 - dx0]
+    canvas[cdy0:cdy1, cdx0:cdx1] = patch[
+        clip_top : clip_top + (cdy1 - cdy0), clip_left : clip_left + (cdx1 - cdx0)
+    ]

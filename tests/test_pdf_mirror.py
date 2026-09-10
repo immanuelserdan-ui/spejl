@@ -173,6 +173,51 @@ def test_sidecar_reports_one_page_and_three_text_runs(source_pdf: Path, tmp_path
     assert doc.pages[0].flags == []  # no embedded images to flag
 
 
+def test_hairline_stroke_survives_as_thin_not_thickened_to_1pt(tmp_path: Path):
+    """Regression: a genuine PDF '0 w' hairline (DWG->PDF exporters use
+    this for wall/gridlines) was read correctly as width 0.0 by
+    get_drawings(), then silently thickened to a full 1pt stroke by
+    `dwg.get("width") or 1.0` treating 0 as falsy.
+
+    The naive fix (pass 0 straight through to Shape.finish) is also
+    wrong: PyMuPDF's own writer gives width=0 a third meaning — it
+    discards the stroke color entirely ("border color makes no sense
+    then"), which would make the line disappear rather than render
+    thin. A small positive width is what actually survives as a visible
+    hairline through PyMuPDF's own Shape.finish().
+
+    Built via a raw content-stream operator rather than
+    Shape.finish(color=..., width=0), because Shape.finish() itself
+    already intercepts width=0 on the way in — the only way to produce
+    a get_drawings() width of exactly 0.0 to mirror is the same way a
+    real CAD-exported PDF would: a literal '0 w' operator in the stream.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    # A no-op draw first, so the page has a contents stream to overwrite.
+    shape = page.new_shape()
+    shape.draw_line(pymupdf.Point(0, 0), pymupdf.Point(1, 1))
+    shape.finish(color=(1, 1, 1), width=1)
+    shape.commit()
+    xref = page.get_contents()[0]
+    doc.update_stream(xref, b"0 w 0 0 0 RG 50 50 m 250 50 l S")
+
+    src = tmp_path / "hairline.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    assert next(dwg["width"] for dwg in pymupdf.open(str(src))[0].get_drawings()) == 0.0
+
+    out = tmp_path / "hairline_mirrored.pdf"
+    mirror_pdf(src, out, axis=Axis.VERTICAL)
+
+    mirrored = pymupdf.open(str(out))
+    width = next(dwg["width"] for dwg in mirrored[0].get_drawings())
+    mirrored.close()
+    assert width < 0.5, f"hairline was thickened to {width}pt"
+    assert width > 0.0, "hairline lost its stroke colour and became invisible"
+
+
 def test_double_mirror_is_close_to_idempotent(source_pdf: Path, tmp_path: Path):
     """Build plan §10: mirroring twice should return close to the source —
     the QA harness's idempotency gate, exercised here on anchor position."""

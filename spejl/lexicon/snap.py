@@ -49,15 +49,6 @@ class SnapResult:
     warning: str | None = None
 
 
-@lru_cache(maxsize=1)
-def _vocabulary() -> tuple[tuple[str, ...], dict[str, str], tuple[str, ...]]:
-    data = json.loads(_LEXICON_PATH.read_text(encoding="utf-8"))
-    rooms = tuple(data["rooms"])
-    abbrev = {k.casefold(): v for k, v in data["abbreviations"].items()}
-    annotations = tuple(data["annotations"])
-    return rooms, abbrev, annotations
-
-
 def _fold(s: str) -> str:
     """Diacritic-insensitive key, with the Danish digraphs OCR substitutes.
 
@@ -70,6 +61,21 @@ def _fold(s: str) -> str:
         lowered = lowered.replace(src, dst)
     stripped = unicodedata.normalize("NFKD", lowered)
     return "".join(c for c in stripped if not unicodedata.combining(c))
+
+
+@lru_cache(maxsize=1)
+def _vocabulary() -> tuple[tuple[str, ...], dict[str, str], tuple[str, ...]]:
+    data = json.loads(_LEXICON_PATH.read_text(encoding="utf-8"))
+    rooms = tuple(data["rooms"])
+    # Keyed with _fold(), matching the lookup site below — not
+    # .casefold(): _fold() unconditionally rewrites æ/ø/å, so a key built
+    # with plain .casefold() (which keeps those letters) could never
+    # match a folded lookup string and the entry would be silently dead.
+    # ("Vær" -> .casefold() "vær", but _fold(head) can never produce "vær"
+    # since _fold always rewrites æ to "ae".)
+    abbrev = {_fold(k): v for k, v in data["abbreviations"].items()}
+    annotations = tuple(data["annotations"])
+    return rooms, abbrev, annotations
 
 
 def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
@@ -103,11 +109,22 @@ def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
     candidates = {r: _fold(r) for r in rooms}
     folded_head = _fold(head)
 
-    # Tier 1 — the string is already a lexicon entry. Never "correct" it.
-    # Danish plans use both "Entre" and "Entré"; fuzzy ranking alone will
-    # happily swap one for the other, which is a regression, not a fix.
+    # Tier 1 — the string is already a lexicon entry, exactly or up to
+    # case. Never "correct" it. Danish plans use both "Entre" and
+    # "Entré"; fuzzy ranking alone will happily swap one for the other,
+    # which is a regression, not a fix — and that includes case variants:
+    # an all-lowercase "entre" must resolve here too, or it falls through
+    # past this guard into the exact ambiguity (Tier 2 sees both "Entre"
+    # and "Entré" fold to the same key) it exists to prevent.
+    # Deliberately `.casefold()`, not `_fold()`: casefold ignores case but
+    # keeps diacritics, so "entre" matches only "Entre", not "Entré" —
+    # `_fold()` would strip the accent and reintroduce the ambiguity.
     if head in rooms:
         return SnapResult(text, raw, "room", False, 1.0)
+    case_matches = [r for r in rooms if r.casefold() == head.casefold()]
+    if len(case_matches) == 1:
+        corrected = case_matches[0] + sep + tail
+        return SnapResult(corrected, raw, "room", corrected != text, 1.0)
 
     # Tier 2 — an unambiguous diacritic-only difference ("Kokken" for
     # "Køkken", "Vaer." for "Vær."): exactly one entry folds to the same

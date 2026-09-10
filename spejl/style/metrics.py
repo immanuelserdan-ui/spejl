@@ -122,14 +122,21 @@ def measure_ink_extent(
     ``4060`` — which sits directly on its own dimension line — would
     measure as tall as the line is long.
     """
-    x0, y0, x1, y1 = (int(round(v)) for v in bbox)
+    raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
     h, w = image.shape[:2]
-    x0, y0 = max(0, x0), max(0, y0)
-    x1, y1 = min(w, x1), min(h, y1)
+    x0, y0 = max(0, raw_x0), max(0, raw_y0)
+    x1, y1 = min(w, raw_x1), min(h, raw_y1)
     vertical = abs(angle_deg) > 45
 
     def _fallback() -> tuple[float, float]:
-        bw, bh = max(1.0, x1 - x0), max(1.0, y1 - y0)
+        # Use the ORIGINAL (unclamped) box, not x0..y1 — those are already
+        # clamped to the image, and for a box that lies partly or wholly
+        # outside it, the clamped deltas collapse toward zero regardless
+        # of the box's real size, which used to hand fit_font_size a
+        # bogus ~1px target and produce an unreadably tiny font with no
+        # error raised.
+        bw = max(1.0, float(raw_x1 - raw_x0))
+        bh = max(1.0, float(raw_y1 - raw_y0))
         return (bh, bw) if vertical else (bw, bh)
 
     if x1 <= x0 or y1 <= y0:
@@ -175,12 +182,24 @@ def fit_font_size(
     Measures the actual ink box of the string, not the font's nominal
     metrics, because cap height varies with which glyphs are present
     ('870' has no descender; 'Køkken' does).
+
+    ``text or "0"`` only guards a truly empty string — a whitespace-only
+    string (`" "`) is truthy, so it reached ``getbbox()`` unguarded and
+    produced a zero-height box at *every* candidate size. With every
+    iteration's error then identical, the strict ``err < best_err``
+    comparison only ever fires once, on the very first midpoint probed —
+    the search silently freezes there, at a size with no relation to
+    ``target_cap_height``, rather than failing loudly or converging.
+    Probing with ``"0"`` instead whenever the string has no visible
+    glyphs keeps the search meaningful even for text nobody should ever
+    end up passing here.
     """
     target = max(1.0, target_cap_height)
+    probe_text = text if text.strip() else "0"
     best, best_err = lo, float("inf")
     while lo <= hi:
         mid = (lo + hi) // 2
-        bbox = _font(font_path, mid).getbbox(text or "0")
+        bbox = _font(font_path, mid).getbbox(probe_text)
         height = (bbox[3] - bbox[1]) if bbox else 0
         err = abs(height - target)
         if err < best_err:

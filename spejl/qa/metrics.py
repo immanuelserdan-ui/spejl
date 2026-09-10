@@ -123,6 +123,47 @@ def load_ground_truth(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def _match_truth_to_detections(
+    truth_runs: list[dict], detections: list[Detection], min_iou: float
+) -> dict[int, int]:
+    """Truth-index -> detection-index, one-to-one, by global best-IoU-first.
+
+    Not the previous per-truth-run-in-list-order greedy: matching truth
+    run A (list order: first) to whatever detection scores best for A,
+    even at IoU 0.16, before truth run B (list order: second) gets a
+    turn — even when B would have matched that same detection at IoU
+    0.9 and has no other candidate above threshold — understated recall
+    and character accuracy for B as a pure scoring artifact, not a real
+    detector failure.
+
+    Sorting every (truth, detection) candidate pair by IoU first and
+    assigning greedily is the standard approximate solution to this
+    (a true Hungarian assignment would be optimal but is unwarranted
+    complexity here — at most a few dozen runs per plan, and near-ties
+    this reorders are rare enough that "the same globally-best match
+    every time" is what actually matters, not exact optimality).
+    """
+    candidates: list[tuple[float, int, int]] = []  # (iou, truth_idx, det_idx)
+    for ti, run in enumerate(truth_runs):
+        t_box = tuple(run["bbox_px"])
+        for di, det in enumerate(detections):
+            iou = _iou(t_box, det.bbox)
+            if iou >= min_iou:
+                candidates.append((iou, ti, di))
+    candidates.sort(key=lambda c: c[0], reverse=True)
+
+    matched_truth: set[int] = set()
+    matched_det: set[int] = set()
+    result: dict[int, int] = {}
+    for iou, ti, di in candidates:
+        if ti in matched_truth or di in matched_det:
+            continue
+        result[ti] = di
+        matched_truth.add(ti)
+        matched_det.add(di)
+    return result
+
+
 def score(
     truth_payload: dict,
     detections: list[Detection],
@@ -137,17 +178,12 @@ def score(
     """
     corrections = corrections or {}
     report = Report()
-    unclaimed = list(enumerate(detections))
+    truth_runs = truth_payload["runs"]
+    matches = _match_truth_to_detections(truth_runs, detections, min_iou)
 
-    for run in truth_payload["runs"]:
-        t_box = tuple(run["bbox_px"])
-        best_idx, best_iou = None, 0.0
-        for idx, det in unclaimed:
-            overlap = _iou(t_box, det.bbox)
-            if overlap > best_iou:
-                best_idx, best_iou = idx, overlap
-
-        if best_idx is None or best_iou < min_iou:
+    for ti, run in enumerate(truth_runs):
+        di = matches.get(ti)
+        if di is None:
             report.runs.append(
                 RunScore(
                     truth=run["text"], detected=None, corrected=None, kind=run["kind"],
@@ -157,9 +193,9 @@ def score(
             )
             continue
 
-        det = detections[best_idx]
-        unclaimed = [(i, d) for i, d in unclaimed if i != best_idx]
-        corrected, warning = corrections.get(best_idx, (det.text, None))
+        det = detections[di]
+        t_box = tuple(run["bbox_px"])
+        corrected, warning = corrections.get(di, (det.text, None))
 
         tcx, tcy = (t_box[0] + t_box[2]) / 2, (t_box[1] + t_box[3]) / 2
         dcx, dcy = det.center
@@ -167,7 +203,7 @@ def score(
             RunScore(
                 truth=run["text"], detected=det.text, corrected=corrected,
                 kind=run["kind"], angle_truth=run["angle_deg"],
-                angle_detected=det.angle_deg, conf=det.conf, iou=best_iou,
+                angle_detected=det.angle_deg, conf=det.conf, iou=_iou(t_box, det.bbox),
                 anchor_error_px=math.hypot(tcx - dcx, tcy - dcy),
                 cap_height_px=run["cap_height_px"], warning=warning,
             )

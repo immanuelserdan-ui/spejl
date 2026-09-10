@@ -10,3 +10,4 @@ out/
 debug/
 *.spejl.json
 .DS_Store
+.claude/
