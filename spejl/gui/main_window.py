@@ -37,21 +37,36 @@ from spejl.models import Axis, Document, Route
 
 _ACCENT = "#0A6E8A"
 
+_DISABLED_TEXT = "#9AA5AB"
+
+# Every rule lives in ONE stylesheet applied once, at the QMainWindow —
+# deliberately never on an intermediate container in between. Qt's style
+# sheet cascade stops propagating an ancestor's ID-selector rules (like
+# #mirrorButton here) past any widget that has its own setStyleSheet()
+# call, even an unrelated one — a container that styles itself directly
+# silently blocks *every* selector-based rule meant for its descendants,
+# with no error and no visual sign beyond "that widget just isn't there".
+# Found exactly that way: the sidebar container's own background/border
+# setStyleSheet() call was silently making the Mirror Plan button (its
+# child) invisible, despite the button reporting correct geometry, text,
+# and an enabled state — see #sidebar below for the fix, and
+# widgets.py's DropZone for the same pattern applied to its own subtitle
+# label rather than to an ancestor's stylesheet, for the same reason.
 _STYLESHEET = f"""
 QMainWindow {{ background: palette(window); }}
+#sidebar {{ background: palette(base); border-right: 1px solid palette(mid); }}
 QPushButton#mirrorButton {{
     background: {_ACCENT}; color: white; border: none;
     border-radius: 6px; padding: 10px 16px; font-weight: 600;
 }}
-QPushButton#mirrorButton:disabled {{ background: palette(mid); color: palette(disabled-text); }}
+QPushButton#mirrorButton:disabled {{ background: palette(mid); color: {_DISABLED_TEXT}; }}
 QPushButton#mirrorButton:hover:!disabled {{ background: #085a72; }}
 QPushButton#saveButton {{
     border: 1px solid {_ACCENT}; color: {_ACCENT}; border-radius: 6px;
     padding: 8px 14px; background: transparent; font-weight: 600;
 }}
-QPushButton#saveButton:disabled {{ border-color: palette(mid); color: palette(disabled-text); }}
+QPushButton#saveButton:disabled {{ border-color: palette(mid); color: {_DISABLED_TEXT}; }}
 QPushButton#saveButton:hover:!disabled {{ background: rgba(10, 110, 138, 0.08); }}
-#dropZoneSubtitle {{ color: palette(mid); font-size: 11px; }}
 #routeBadge {{ font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }}
 #routeBadge[route="vector"] {{ background: rgba(10, 110, 138, 0.15); color: {_ACCENT}; }}
 #routeBadge[route="raster"] {{ background: rgba(162, 76, 7, 0.15); color: #A24C07; }}
@@ -86,8 +101,8 @@ class MainWindow(QMainWindow):
 
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
+        sidebar.setObjectName("sidebar")  # styled from _STYLESHEET, not a call here — see its comment
         sidebar.setFixedWidth(300)
-        sidebar.setStyleSheet("background: palette(base); border-right: 1px solid palette(mid);")
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)

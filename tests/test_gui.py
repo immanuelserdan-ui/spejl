@@ -47,6 +47,50 @@ def window(qapp):
     win.close()
 
 
+def test_mirror_button_actually_renders_its_accent_colour(window, tmp_path):
+    """Regression for a real bug found in manual testing: the sidebar
+    container had its own setStyleSheet() call for its background/
+    border, which — silently, with no error and no visible sign beyond
+    the widget just not being there — blocks Qt's style-sheet cascade
+    from carrying the MAIN WINDOW's ID-selector rules (#mirrorButton,
+    #saveButton, #routeBadge) down to that container's children at all.
+    The button reported correct geometry, text, and enabled state the
+    whole time; only the actual painted pixels were wrong.
+
+    Property checks (isVisible, isEnabled, geometry) do NOT catch this
+    class of bug — only sampling real rendered pixels does, which is
+    why this test grabs the widget and checks its own paint output
+    rather than asking Qt about its logical state.
+    """
+    from spejl.qa import fixture_gen
+
+    info = fixture_gen.generate(tmp_path, dpi=100)
+    window._on_file_chosen(info["png"])
+    window._mirror_button.setEnabled(True)  # exercise the enabled (accent-blue) paint path
+    window.resize(1172, 750)
+    window.show()
+    from PySide6.QtWidgets import QApplication
+
+    QApplication.processEvents()
+
+    pixmap = window._mirror_button.grab()
+    image = pixmap.toImage()
+    assert image.width() > 0 and image.height() > 0
+
+    # Sample the centre pixel: accent blue (#0A6E8A) if rendering
+    # correctly, or the sidebar's plain white/base background if the
+    # cascade is broken again and the button silently isn't painting.
+    centre = image.pixelColor(image.width() // 2, image.height() // 2)
+    is_near_white = centre.red() > 230 and centre.green() > 230 and centre.blue() > 230
+    assert not is_near_white, (
+        f"mirror button centre pixel is {centre.getRgb()} — looks unpainted, "
+        "not the accent-coloured button"
+    )
+    # And specifically: it should be recognisably the dark teal accent,
+    # not just "not white" for some unrelated reason.
+    assert centre.blue() > centre.red(), f"expected a blue-leaning accent, got {centre.getRgb()}"
+
+
 def test_window_constructs_with_expected_widgets(window):
     assert window._mirror_button.isEnabled() is False  # no file chosen yet
     assert window._save_button.isEnabled() is False

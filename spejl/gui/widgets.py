@@ -34,7 +34,13 @@ class DropZone(QFrame):
         self._title.setWordWrap(True)
         self._subtitle = QLabel("PDF · PNG · JPEG · TIFF · BMP")
         self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self._subtitle.setObjectName("dropZoneSubtitle")
+        # Styled inline, not via an ancestor's ID-selector rule: DropZone
+        # sets its own stylesheet on itself below (to redraw the dashed
+        # border on drag-active), and Qt's cascade doesn't carry an
+        # ancestor's selector-based rules past a widget that has done
+        # that — see main_window.py's _STYLESHEET comment for the fuller
+        # story (the same pattern made the Mirror Plan button invisible).
+        self._subtitle.setStyleSheet("color: palette(mid); font-size: 11px;")
         layout.addWidget(self._icon)
         layout.addWidget(self._title)
         layout.addWidget(self._subtitle)
