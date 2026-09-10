@@ -6,10 +6,20 @@ labels at two visibly different sizes.
 from __future__ import annotations
 
 from spejl.raster.pipeline import MirroredRun, _snap_consistent_sizes
-from spejl.style.metrics import TextStyle, resolve_font
+from spejl.style.metrics import TextStyle, font_measure_width, resolve_font
 
 
-def _run(text: str, kind: str, px_size: int, along: float = 50.0) -> MirroredRun:
+def _run(text: str, kind: str, px_size: int, along: float | None = None) -> MirroredRun:
+    """A synthetic run whose (along, px_size) are self-consistent — the
+    real pipeline never sees a target width unrelated to the size that
+    was independently fit to reach it, and a test fixture that does
+    isn't testing the same thing the real code has to handle. Default
+    ``along`` is this string's own natural width at ``px_size`` (0
+    tracking): realistic for "this run's own best independent fit",
+    which is exactly what every run looks like before clustering runs.
+    """
+    if along is None:
+        along = font_measure_width(text, resolve_font(), px_size, 0.0)
     style = TextStyle(
         font_path=resolve_font(), px_size=px_size, tracking=0.0,
         ink=(0, 0, 0), paper=(255, 255, 255), cap_height_px=float(px_size) * 0.7,

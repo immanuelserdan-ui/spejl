@@ -166,6 +166,8 @@ def measure_ink_extent(
     if not boxes:
         return _fallback()
 
+    boxes = _main_glyph_cluster(boxes, ch, cw, vertical)
+
     gx0 = min(b[0] for b in boxes)
     gy0 = min(b[1] for b in boxes)
     gx1 = max(b[2] for b in boxes)
@@ -173,6 +175,72 @@ def measure_ink_extent(
     ink_w = max(1.0, float(gx1 - gx0))
     ink_h = max(1.0, float(gy1 - gy0))
     return (ink_h, ink_w) if vertical else (ink_w, ink_h)
+
+
+def _main_glyph_cluster(
+    boxes: list[tuple[int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
+) -> list[tuple[int, int, int, int]]:
+    """Keep only the components that form one word's own glyphs, and
+    drop anything sitting in a detection box that isn't actually part
+    of it.
+
+    A detector's box is not always airtight around just its own text —
+    a nearby door-swing arc or a dimension tick can fall just inside
+    it. That single extra component is compact (so the elongation
+    filter above lets it through), which is what makes it dangerous:
+    the ONE thing that reliably separates it from real letter parts
+    (an 'i's dot, a broken serif, disconnected pixels of a stroke) is
+    that a real letter part is never a sliver of the main glyph mass —
+    it is a meaningful fraction of it. Confirmed on this project's own
+    golden fixture: a stray 2x7px, 10-pixel-area fragment sitting just
+    above 'Bad's own 726-pixel-area text mass inflated its measured cap
+    height 14% over its true size (identical to 'Toilet' right next to
+    it, verified against this fixture's own ground truth).
+
+    Filtering happens on the CROSS-baseline axis only — Y for
+    horizontal text, X for vertical — never on the along-baseline axis,
+    which is the reading direction and where real, sometimes-generous
+    gaps between characters or words are completely normal (','Vær. 1'
+    has a genuine gap before its '1'; a vertical dimension's digits
+    are legitimately spaced apart top-to-bottom). An early version of
+    this filter checked gaps on the crop's Y-axis unconditionally,
+    which is correct for horizontal words but wrong for a vertical run:
+    it read the ordinary spacing between a vertical string's own
+    stacked digits as "this might be a stray mark," discarded every
+    digit but the single largest, and roughly halved '5155's measured
+    length — a 37% OVERSIZE once that truncated measurement was used
+    as the target width for re-rendering the full string.
+    """
+    if len(boxes) <= 1:
+        return boxes
+
+    def area(b: tuple[int, int, int, int]) -> int:
+        return (b[2] - b[0]) * (b[3] - b[1])
+
+    def cross_span(b: tuple[int, int, int, int]) -> tuple[int, int]:
+        return (b[0], b[2]) if vertical else (b[1], b[3])
+
+    ordered = sorted(boxes, key=area, reverse=True)
+    anchor_area = area(ordered[0])
+    min_area = max(1, round(anchor_area * 0.08))
+    gap_tolerance = max(1, round((crop_width if vertical else crop_height) * 0.15))
+
+    cluster = [ordered.pop(0)]
+    remaining = [b for b in ordered if area(b) >= min_area]
+    band0, band1 = cross_span(cluster[0])
+
+    changed = True
+    while changed and remaining:
+        changed = False
+        for box in list(remaining):
+            b0, b1 = cross_span(box)
+            if b0 <= band1 + gap_tolerance and b1 >= band0 - gap_tolerance:
+                cluster.append(box)
+                remaining.remove(box)
+                band0, band1 = min(band0, b0), max(band1, b1)
+                changed = True
+
+    return cluster
 
 
 def fit_font_size(

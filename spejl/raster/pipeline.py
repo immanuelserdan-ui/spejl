@@ -309,6 +309,9 @@ def _snap_consistent_sizes(runs: list[MirroredRun]) -> None:
         _snap_cluster_to_median(cluster)
 
 
+_SNAP_MAX_OVERSHOOT = 1.20  # matches the size-fidelity gate's own worst-case ceiling
+
+
 def _snap_cluster_to_median(cluster: list[MirroredRun]) -> None:
     if len(cluster) < 2:
         return
@@ -321,6 +324,19 @@ def _snap_cluster_to_median(cluster: list[MirroredRun]) -> None:
         tracking = solve_tracking(run.text, old.font_path, median, old.ink_along_px)
         natural_tracked = font_measure_width(run.text, old.font_path, median, tracking * median)
         width_scale = solve_horizontal_scale(natural_tracked, old.ink_along_px)
+
+        # Guard against exactly the failure this feature's own regression
+        # test caught: a short string (a 4-digit dimension) has little
+        # room to absorb a size bump proportionally, so snapping it to a
+        # cluster-mate's larger size — appropriate for most members —
+        # can overshoot ITS OWN measured width well past what any other
+        # stage of this pipeline would accept. Skip the snap rather than
+        # render a run wider than the fit-to-box guard elsewhere in this
+        # same pipeline would ever let through.
+        rendered_width = natural_tracked * width_scale
+        if rendered_width > old.ink_along_px * _SNAP_MAX_OVERSHOOT:
+            continue
+
         run.style = replace(old, px_size=median, tracking=tracking, width_scale=width_scale)
 
 
