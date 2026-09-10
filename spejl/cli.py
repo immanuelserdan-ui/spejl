@@ -44,22 +44,25 @@ def mirror(
 
         doc = mirror_pdf(input_path, output, axis=axis)
     else:
-        typer.secho(
-            "Raster mirroring (OCR + reconstruction, Route B) isn't built yet — "
-            "this CLI currently only handles vector PDFs. See the build plan, Phase 2.",
-            fg=typer.colors.RED,
-        )
-        raise typer.Exit(code=1)
+        from spejl.raster.pipeline import mirror_raster
+
+        try:
+            doc = mirror_raster(input_path, output, axis=axis).document
+        except ValueError as exc:  # resolution too low to mirror honestly
+            typer.secho(str(exc), fg=typer.colors.RED)
+            raise typer.Exit(code=1) from exc
 
     sidecar = output.with_suffix(output.suffix + ".spejl.json")
     sidecar.write_text(json.dumps(doc.to_sidecar(), indent=2), encoding="utf-8")
 
     total_runs = sum(p.text_runs_mirrored for p in doc.pages)
     total_flags = sum(len(p.flags) for p in doc.pages)
+    # ASCII only: Windows consoles default to cp1252, which cannot encode
+    # the obvious tick/arrow glyphs and would crash on the success path.
     typer.secho(
-        f"✓ {input_path.name} → {output.name}  "
+        f"OK  {input_path.name} -> {output.name}  "
         f"({len(doc.pages)} page(s), {total_runs} text run(s) mirrored"
-        + (f", {total_flags} flag(s) — see {sidecar.name}" if total_flags else "")
+        + (f", {total_flags} flag(s) - see {sidecar.name}" if total_flags else "")
         + ")",
         fg=typer.colors.GREEN,
     )

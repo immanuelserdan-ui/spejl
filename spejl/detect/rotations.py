@@ -46,19 +46,40 @@ def _unrotate_point(
     return (src_w - 1 - y, x)  # ROTATE_90_COUNTERCLOCKWISE
 
 
-def _iou(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+def _intersection(a: tuple[float, ...], b: tuple[float, ...]) -> float:
     ax0, ay0, ax1, ay1 = a
     bx0, by0, bx1, by1 = b
-    ix0, iy0 = max(ax0, bx0), max(ay0, by0)
-    ix1, iy1 = min(ax1, bx1), min(ay1, by1)
-    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
-    inter = iw * ih
+    iw = max(0.0, min(ax1, bx1) - max(ax0, bx0))
+    ih = max(0.0, min(ay1, by1) - max(ay0, by0))
+    return iw * ih
+
+
+def _area(box: tuple[float, ...]) -> float:
+    return max(0.0, box[2] - box[0]) * max(0.0, box[3] - box[1])
+
+
+def _iou(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    inter = _intersection(a, b)
     if inter <= 0:
         return 0.0
-    area_a = max(0.0, ax1 - ax0) * max(0.0, ay1 - ay0)
-    area_b = max(0.0, bx1 - bx0) * max(0.0, by1 - by0)
-    union = area_a + area_b - inter
+    union = _area(a) + _area(b) - inter
     return inter / union if union > 0 else 0.0
+
+
+def _containment(a: tuple[float, ...], b: tuple[float, ...]) -> float:
+    """Intersection over the *smaller* box's area.
+
+    IoU is the wrong measure for a fragment sitting inside a run: a lone
+    'B' detected inside 'Bad' scores only 0.28 IoU, because the union is
+    dominated by the larger box — so it survives NMS and gets drawn a
+    second time, as a ghost glyph over the real label. Containment
+    catches it at 1.0.
+    """
+    inter = _intersection(a, b)
+    if inter <= 0:
+        return 0.0
+    smaller = min(_area(a), _area(b))
+    return inter / smaller if smaller > 0 else 0.0
 
 
 def _orientation_is_plausible(det: Detection) -> bool:
@@ -126,20 +147,31 @@ def _canonicalise_vertical(det: Detection) -> Detection:
     return det
 
 
-def _merge(candidates: list[Detection], iou_threshold: float) -> list[Detection]:
-    """Confidence-ranked NMS.
+def _merge(
+    candidates: list[Detection],
+    iou_threshold: float,
+    containment_threshold: float = 0.6,
+) -> list[Detection]:
+    """Confidence-ranked NMS over both overlap measures.
 
-    A tie-break matters here: the same run is often found by two passes
-    with near-identical confidence, and the winner decides the recorded
-    angle. Longer text wins ties, because the failure mode this whole
-    triple pass exists to fix is a rotated run coming back *truncated*
-    ('2105' read as '105') — and the truncated read is not reliably the
-    less confident one.
+    Two tie-breaks matter here:
+
+    * **Longer text wins.** The failure this triple pass exists to fix is
+      a rotated run coming back *truncated* ('2105' read as '105'), and
+      the truncated read is not reliably the less confident one.
+    * **Containment suppresses.** A detection mostly inside an already
+      kept run is a fragment of it, never a new run — see
+      :func:`_containment`.
     """
     ordered = sorted(candidates, key=lambda d: (d.conf, len(d.text)), reverse=True)
     kept: list[Detection] = []
     for cand in ordered:
-        overlapping = [k for k in kept if _iou(cand.bbox, k.bbox) > iou_threshold]
+        overlapping = [
+            k
+            for k in kept
+            if _iou(cand.bbox, k.bbox) > iou_threshold
+            or _containment(cand.bbox, k.bbox) > containment_threshold
+        ]
         if not overlapping:
             kept.append(cand)
             continue

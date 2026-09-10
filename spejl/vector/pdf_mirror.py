@@ -30,14 +30,17 @@ swallowed:
 
 from __future__ import annotations
 
-import math
 from pathlib import Path
 
 import pymupdf
 
 from spejl.models import Axis, Document, Flag, PageResult, Route
+from spejl.transform import mirror as M
 
-_EPS = 1e-6
+# Point/direction mirroring and the readability convention live in
+# transform/mirror.py, shared with Route B — two copies of that rule
+# would be free to drift, and it is the rule the whole tool turns on.
+_mirror_point = M.mirror_point
 
 # Font-family fallback: CAD-exported PDFs overwhelmingly set a
 # Helvetica/Arial-alike, so that is the default; a document that
@@ -145,59 +148,17 @@ def _int_to_rgb(color_int: int) -> tuple[float, float, float]:
     return (r / 255, g / 255, b / 255)
 
 
-def _mirror_point(x: float, y: float, W: float, H: float, axis: Axis) -> tuple[float, float]:
-    if axis is Axis.VERTICAL:
-        return (W - x, y)
-    if axis is Axis.HORIZONTAL:
-        return (x, H - y)
-    return (W - x, H - y)  # BOTH — point reflection
-
-
-def _is_canonical_direction(dx: float, dy: float) -> bool:
-    """True if a baseline pointing (dx, dy) reads the way a drafter expects:
-    left-to-right when it has any horizontal component, bottom-to-top when
-    it is purely vertical (ISO dimension-text convention; screen y is
-    down, so "reads upward" means dy < 0).
-
-    This is a fixed convention, deliberately independent of which axis is
-    being mirrored: a vertical dimension always ends up reading bottom-to-
-    top, whether the mirror was left/right or top/bottom. The alternative
-    — letting a top/bottom mirror flip vertical text upside down — would
-    make the tool's output depend on an axis choice in a way no real
-    drafting standard does; only the *position* of the run should move.
-    """
-    if dx > _EPS:
-        return True
-    if dx < -_EPS:
-        return False
-    return dy < _EPS  # dx ~ 0: canonical iff dy <= 0 (bottom-up or degenerate)
-
-
-def _mirror_direction(dx: float, dy: float, axis: Axis) -> tuple[float, float]:
-    """Reflect a baseline direction, then pick the traversal (of the two
-    that describe the same mirrored line) that stays readable — see the
-    build plan §05 and this module's docstring for why this is safe even
-    for diagonals: negating a direction vector names the same line.
-    """
-    if axis is Axis.VERTICAL:
-        dxf, dyf = -dx, dy
-    elif axis is Axis.HORIZONTAL:
-        dxf, dyf = dx, -dy
-    else:
-        dxf, dyf = -dx, -dy
-    if not _is_canonical_direction(dxf, dyf):
-        dxf, dyf = -dxf, -dyf
-    return dxf, dyf
-
-
 def _rotate_param(dx: float, dy: float) -> int:
     """Map a canonicalised direction to PyMuPDF's ``insert_text(rotate=)``
-    quarter-turn steps. Empirically (see the build session's API probe):
-    ``rotate=90`` produces direction (0, -1) — i.e. ``rotate`` is the
-    negative of the screen-space ``atan2(dy, dx)`` angle.
+    quarter-turn steps.
+
+    ``rotate`` is the negative of the screen-space ``atan2(dy, dx)``
+    angle — i.e. exactly Spejl's own angle convention, confirmed
+    empirically during the build: ``rotate=90`` produces direction
+    (0, -1). Quarter turns only, hence the rounding; the module docstring
+    covers what that costs for diagonal text.
     """
-    angle_screen = math.degrees(math.atan2(dy, dx))
-    return int(round(-angle_screen / 90) * 90) % 360
+    return int(round(M.angle_from_direction(dx, dy) / 90) * 90) % 360
 
 
 def _font_alias(font_name: str, bold: bool, italic: bool) -> str:
@@ -219,7 +180,7 @@ def _reinsert_mirrored_span(
     mx1, my1 = _mirror_point(x1, y1, W, H, axis)
     cx, cy = (mx0 + mx1) / 2, (my0 + my1) / 2  # mirrored box centre — the anchor
 
-    dxf, dyf = _mirror_direction(span["dir"][0], span["dir"][1], axis)
+    dxf, dyf = M.mirror_direction(span["dir"][0], span["dir"][1], axis)
     rotate = _rotate_param(dxf, dyf)
 
     fontname = _font_alias(span["font"], span["bold"], span["italic"])

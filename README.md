@@ -20,15 +20,21 @@ the page's vector geometry, and re-inserts every string upright at its
 mirrored, ISO-convention-correct anchor — no OCR, no reconstruction,
 no loss.
 
-**Phase 2 detection is spiked and measured.** Route B's riskiest
-assumption — that OCR can read small rotated dimension text and Danish
-diacritics off a plan — is settled. Against the golden fixture, triple-
-pass detection plus the lexicon reaches **100% text recall, 100%
-character accuracy and 100% orientation accuracy at both 150 and 300
-dpi**, with mean anchor error 1.7 px. `pytest` enforces those as gates.
+**Route B (raster PNG/JPEG, S1–S7) is built end-to-end and passing its
+own round-trip test:** mirror the golden fixture, then OCR the *output*
+and confirm every string reads back correctly at its mirrored position.
+100% text recall, 100% character accuracy, 100% orientation accuracy, no
+text drawn over linework, re-rendered type within ~2% of the source's
+measured ink size, and mirroring twice still comes back at 100% accuracy
+— see `tests/test_raster_pipeline.py`.
 
-Still to build for a working raster pipeline: erase + line repair (S5),
-the flip (S6, trivial), and re-render (S7).
+```bash
+spejl mirror plan.png --axis v      # same CLI as the vector path
+```
+
+Command line:
+`python -m spejl.cli mirror <file>` routes automatically — vector PDF
+takes Route A, raster PNG/JPEG takes Route B.
 
 ### Measuring detection yourself
 
@@ -78,14 +84,33 @@ this is meant to satisfy at full pipeline scale.
 
 ```
 spejl/
-├── models.py           Axis, Route, Document, Flag — the shared contract
-├── router.py            sniff format → Route A (vector) vs Route B (raster)
-├── vector/pdf_mirror.py Route A: page-geometry reconstruction + per-run
-│                        text mirroring (the build plan's §05 math, live)
-└── cli.py                `spejl mirror ...`
-tests/test_pdf_mirror.py
-docs/build-plan.html      the full blueprint (stack decision, roadmap,
-                           edge cases, acceptance gates)
-demo/                      a tiny synthetic plan.pdf / plan_mirrored.pdf
-                           pair, generated for a CLI smoke test
+├── models.py            Axis, Route, Document, Flag — the shared contract
+├── router.py             sniff format → Route A (vector) vs Route B (raster)
+├── transform/mirror.py   the mirror math BOTH routes share: point/bbox
+│                         reflection, the readability-canonicalisation
+│                         angle rule (build plan §05), image flip
+├── vector/pdf_mirror.py  Route A: page-geometry reconstruction + per-run
+│                         text mirroring
+├── detect/
+│   ├── ocr.py             OcrBackend protocol + RapidOCR adapter
+│   └── rotations.py       triple-pass detection, NMS + containment merge
+├── lexicon/               Danish plan vocabulary + three-tier snap (S3)
+├── style/metrics.py       measure ink/paper/size/tracking from pixels (S4)
+├── erase/clean.py         local-paper erase + line-pixel repair (S5)
+├── render/text.py         supersampled re-render, fit-to-box, collision (S7)
+├── raster/pipeline.py     wires S1–S7 together — the Route B entry point
+├── qa/
+│   ├── fixture_gen.py     golden fixture with free ground truth (vector-drawn)
+│   ├── metrics.py         recall / char accuracy / anchor error scoring
+│   └── score_ocr.py       `python -m spejl.qa.score_ocr` — the go/no-go report
+└── cli.py                 `spejl mirror ...` (routes A vs B automatically)
+tests/
+├── test_pdf_mirror.py      Route A
+├── test_transform.py       shared mirror math
+├── test_lexicon.py         Danish diacritic + dimension-plausibility snap
+├── test_detect_ocr.py      detection gates (marked slow — loads OCR models)
+└── test_raster_pipeline.py Route B round-trip: mirror -> OCR the output -> score
+docs/build-plan.html       the full blueprint (stack decision, roadmap,
+                            edge cases, acceptance gates)
+demo/                       synthetic before/after pairs for a visual check
 ```
