@@ -191,3 +191,40 @@ def test_vr_period_abbreviation_is_a_curated_lexicon_entry():
     result = snap("Vr.")
     assert result.text == "Vær."
     assert result.kind == "room"
+
+
+@pytest.mark.parametrize(
+    ("raw", "would_have_matched"),
+    [
+        ("T", "Stue"),
+        ("O", "Køkken"),
+        ("H", "Have"),
+        ("S", "Stue"),
+    ],
+)
+def test_a_bare_single_letter_is_never_fuzzy_matched_to_a_full_room_word(
+    raw: str, would_have_matched: str
+):
+    """Regression: found by proactively auditing every real plan in the
+    project folder, not from a single reported screenshot. A stray
+    single-character OCR detection — on the real plan this was found
+    on, a 'T' roughly 800px away from the room actually labelled 'Stue',
+    almost certainly an unrelated architectural annotation — fuzzy-
+    matched to a full room word at 90% confidence and rendered as a
+    SPURIOUS DUPLICATE label at the wrong (tiny) size, with no warning
+    flag at all (the match "succeeded", so nothing looked wrong).
+
+    WRatio scores a single character very high against any word that
+    happens to contain it as a substring ('t' is literally in 'stue'),
+    which is true of almost every letter against almost every word in
+    a ~60-word vocabulary — one character is never enough evidence for
+    a confident correction, no matter what the score says. Tier 1
+    (exact) and Tier 2 (unambiguous fold) are naturally immune — a
+    single character can never equal a whole word — so only Tier 3
+    needed the length floor.
+    """
+    result = snap(raw)
+    assert result.text == raw  # left exactly as read, not guessed at
+    assert result.kind == "unknown"
+    assert result.warning is not None
+    assert result.text != would_have_matched

@@ -36,6 +36,19 @@ _AREA_RE = re.compile(r"^\d{1,3}(?:[,.]\d{1,2})?\s*m[²2]?$")
 DIM_MIN_MM = 200
 DIM_MAX_MM = 20000
 
+# Below this, a fuzzy match is guessing, not correcting. A bare single
+# letter shares SOME similarity with almost any short word by chance
+# alone (WRatio scores 'T' against 'Stue' at 90 -- comfortably over
+# min_score -- because 't' is literally a substring of 'stue'), so
+# without a floor, any stray single-character detection ANYWHERE on the
+# sheet confidently relabels itself as a full room name. Confirmed on a
+# real plan: an unrelated 'T' annotation roughly 800px away from the
+# room labelled 'Stue' snapped to 'Stue' anyway, rendering a spurious
+# duplicate label at the wrong (tiny) size. Tier 1 (exact) and Tier 2
+# (unambiguous fold) are naturally immune -- a single character can
+# never equal a whole word -- so only Tier 3 needs this guard.
+_MIN_FUZZY_HEAD_LEN = 3
+
 
 @dataclass(frozen=True)
 class SnapResult:
@@ -154,8 +167,13 @@ def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
         return SnapResult(corrected, raw, "room", corrected != text, 1.0)
 
     # Tier 3 — genuine fuzzy match, for OCR damage beyond diacritics.
-    match = process.extractOne(
-        folded_head, candidates, scorer=fuzz.WRatio, processor=None
+    # See _MIN_FUZZY_HEAD_LEN's own comment: a head this short is too
+    # little evidence for a similarity score to mean anything, no matter
+    # how high it comes back.
+    match = (
+        process.extractOne(folded_head, candidates, scorer=fuzz.WRatio, processor=None)
+        if len(folded_head) >= _MIN_FUZZY_HEAD_LEN
+        else None
     )
     if match is not None:
         _folded_value, score, matched_room = match
