@@ -187,9 +187,56 @@ class MainWindow(QMainWindow):
         self._mirrored_view, mirrored_pane = self._make_preview_pane("Mirrored")
         splitter.addWidget(source_pane)
         splitter.addWidget(mirrored_pane)
-        splitter.setSizes([1, 1])
+        # setSizes([1, 1]) only proposes a starting split — Qt does not
+        # guarantee the two sides end up equal width from it (nor after
+        # any later resize or a user drag of the handle), which is
+        # exactly what let the Source and Mirrored panes end up
+        # different widths and, since each independently fit its own
+        # pixmap to its own box, show the identical drawing at two
+        # visibly different zoom levels. Equal stretch factors are the
+        # part of this that actually holds under resize; the shared-
+        # scale coordinator below (_sync_preview_scale) is what holds
+        # even if the user drags the handle to something unequal anyway.
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
         layout.addWidget(splitter)
+
+        self._source_view.resized.connect(self._sync_preview_scale)
+        self._mirrored_view.resized.connect(self._sync_preview_scale)
+
         return container
+
+    def _sync_preview_scale(self) -> None:
+        """Render Source and Mirrored at ONE shared scale, so the same
+        physical drawing is always the same size in both panes —
+        whichever pane/image pairing is the tighter fit sets the scale
+        for both, rather than each independently maximising itself into
+        whatever space it happens to have. See ScaledImageLabel's
+        docstring for why "each fits its own box" broke this."""
+        src_size = self._source_view.source_size()
+        mir_size = self._mirrored_view.source_size()
+        if src_size.isEmpty() and mir_size.isEmpty():
+            return
+
+        def fit_scale(img_size, box_size) -> float | None:
+            if img_size.isEmpty() or box_size.width() <= 0 or box_size.height() <= 0:
+                return None
+            return min(box_size.width() / img_size.width(), box_size.height() / img_size.height())
+
+        candidates = [
+            s
+            for s in (
+                fit_scale(src_size, self._source_view.size()),
+                fit_scale(mir_size, self._mirrored_view.size()),
+            )
+            if s is not None
+        ]
+        if not candidates:
+            return
+        scale = min(candidates)  # the tighter of the two pane/image pairings
+
+        self._source_view.render_at_scale(scale)
+        self._mirrored_view.render_at_scale(scale)
 
     @staticmethod
     def _make_preview_pane(caption: str) -> tuple[ScaledImageLabel, QWidget]:
@@ -230,6 +277,7 @@ class MainWindow(QMainWindow):
 
         pixmap = load_preview(path)
         self._source_view.set_pixmap_source(pixmap)
+        self._sync_preview_scale()
         if pixmap is None:
             self._status_label.setText("Could not preview this file — mirroring may still work.")
 
@@ -273,6 +321,7 @@ class MainWindow(QMainWindow):
 
         pixmap = load_preview(document.output)
         self._mirrored_view.set_pixmap_source(pixmap)
+        self._sync_preview_scale()
 
         total_runs = sum(p.text_runs_mirrored for p in document.pages)
         total_flags = sum(len(p.flags) for p in document.pages)

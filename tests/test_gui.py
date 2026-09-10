@@ -47,6 +47,43 @@ def window(qapp):
     win.close()
 
 
+def test_source_and_mirrored_panes_render_at_the_same_scale(window, tmp_path):
+    """Regression: a QSplitter does not guarantee its two sides end up
+    equal width (confirmed on real hardware: 571px vs 660px from an
+    identical setSizes([1, 1]) call), and each preview pane used to
+    independently fit its own pixmap to its own box — so the exact same
+    drawing, at the exact same pixel dimensions, rendered at two
+    different on-screen sizes. Nothing about that was wrong per-widget
+    (each pane really did fit itself correctly); it only becomes a bug
+    when the two are meant to be compared side by side. The fix makes
+    both panes share one externally-computed scale instead of each
+    computing its own, so this holds regardless of how the splitter
+    ends up sized — including deliberately unequal here, not by
+    accident, to prove the fix doesn't depend on the split being equal.
+    """
+    from spejl.qa import fixture_gen
+
+    info = fixture_gen.generate(tmp_path, dpi=100)
+    window._on_file_chosen(info["png"])
+    # Same pixmap on both sides (source==mirrored dimensions is the
+    # common, no-upscale case) with DELIBERATELY unequal pane widths.
+    window._mirrored_view.set_pixmap_source(window._source_view._source)
+    window._source_view.resize(400, 500)
+    window._mirrored_view.resize(650, 500)
+    window._sync_preview_scale()
+
+    src_pixmap = window._source_view.pixmap()
+    mir_pixmap = window._mirrored_view.pixmap()
+    assert src_pixmap is not None and mir_pixmap is not None
+    assert src_pixmap.size() == mir_pixmap.size(), (
+        f"same drawing rendered at different sizes: "
+        f"{src_pixmap.size()} vs {mir_pixmap.size()}"
+    )
+    # And specifically constrained by the NARROWER pane, not the wider
+    # one — the whole point being neither pane independently decides.
+    assert src_pixmap.width() <= 400
+
+
 def test_mirror_button_actually_renders_its_accent_colour(window, tmp_path):
     """Regression for a real bug found in manual testing: the sidebar
     container had its own setStyleSheet() call for its background/

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import QSize, Qt, Signal
 from PySide6.QtGui import QDragEnterEvent, QDropEvent, QPixmap
 from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QVBoxLayout, QWidget
 
@@ -98,7 +98,21 @@ class DropZone(QFrame):
 
 
 class ScaledImageLabel(QLabel):
-    """A QLabel that keeps its pixmap fit to whatever size it's given."""
+    """A QLabel that draws its pixmap at an EXTERNALLY chosen scale.
+
+    Deliberately not "fit myself to my own size" — that independent
+    behaviour is what let the Source and Mirrored panes show the exact
+    same drawing at two different on-screen sizes: a QSplitter does not
+    guarantee its two sides end up equal width, and two labels each
+    independently maximising their own pixmap to fill whatever space
+    *they* got will happily draw the same content at two different
+    zoom levels with no error and no visual cue beyond "one of these
+    looks bigger than the other." A pair of these is meant to be driven
+    by one shared-scale coordinator (see MainWindow._sync_preview_scale)
+    so a before/after comparison is actually comparable.
+    """
+
+    resized = Signal()
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -108,18 +122,29 @@ class ScaledImageLabel(QLabel):
 
     def set_pixmap_source(self, pixmap: QPixmap | None) -> None:
         self._source = pixmap
-        self._rescale()
+        if pixmap is None or pixmap.isNull():
+            self.setPixmap(QPixmap())
+
+    def source_size(self) -> QSize:
+        return self._source.size() if self._source and not self._source.isNull() else QSize(0, 0)
 
     def resizeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         super().resizeEvent(event)
-        self._rescale()
+        self.resized.emit()  # a coordinator recomputes the SHARED scale, not this label alone
 
-    def _rescale(self) -> None:
-        if self._source is None or self._source.isNull():
+    def render_at_scale(self, scale: float) -> None:
+        """Draw the source pixmap scaled by exactly ``scale`` — the
+        same physical drawing at the same zoom the sibling pane is
+        using, not independently fit to this label's own box."""
+        if self._source is None or self._source.isNull() or scale <= 0:
             self.setPixmap(QPixmap())
             return
+        target = QSize(
+            max(1, round(self._source.width() * scale)),
+            max(1, round(self._source.height() * scale)),
+        )
         scaled = self._source.scaled(
-            self.size(),
+            target,
             Qt.AspectRatioMode.KeepAspectRatio,
             Qt.TransformationMode.SmoothTransformation,
         )
