@@ -51,6 +51,12 @@ def _draw_string(
     reduces ``px_size`` shrinks the letter-spacing right along with it,
     rather than reapplying an unchanged pixel gap to smaller and smaller
     glyphs until they overlap.
+
+    ``style.width_scale`` (see ``style.metrics.solve_horizontal_scale``)
+    is applied last, as a horizontal resize of the finished tile — baked
+    in here rather than by the caller, so every consumer of this tile's
+    width (the fit-to-box shrink loop included) measures the scaled
+    width automatically, with nothing further to keep in sync.
     """
     font = ImageFont.truetype(style.font_path, max(1, px_size * scale))
     track = tracking_em * px_size * scale
@@ -69,7 +75,13 @@ def _draw_string(
         draw.text((x, pad), ch, font=font, fill=(*style.ink, 255))
         x += advance + track
 
-    return tile.crop(tile.getbbox() or (0, 0, tile.width, tile.height))
+    tile = tile.crop(tile.getbbox() or (0, 0, tile.width, tile.height))
+
+    if abs(style.width_scale - 1.0) > 1e-3:
+        scaled_w = max(1, round(tile.width * style.width_scale))
+        tile = tile.resize((scaled_w, tile.height), Image.LANCZOS)
+
+    return tile
 
 
 def render_run(

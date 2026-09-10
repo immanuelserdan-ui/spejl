@@ -48,6 +48,7 @@ class TextStyle:
     paper: tuple[int, int, int]    # RGB
     cap_height_px: float           # measured ink extent across the baseline
     ink_along_px: float = 0.0      # measured ink extent along the baseline
+    width_scale: float = 1.0       # horizontal stretch/compress, applied after tracking — see solve_horizontal_scale
 
 
 def resolve_font(bold: bool = False) -> str:
@@ -233,9 +234,43 @@ def solve_tracking(text: str, font_path: str, px_size: int, target_width: float)
     gaps = len(text) - 1
     tracking_px = (target_width - natural) / gaps
     tracking_em = tracking_px / px_size
-    # Tightened from a naive -12%: digits have tight side bearings, and
-    # tracking past roughly -8% of the em starts to visibly touch.
-    return float(np.clip(tracking_em, -0.08, 0.5))
+    # Asymmetric on purpose, and the asymmetry is load-bearing, found
+    # by a real regression this build caught before it shipped:
+    # negative (compressing) tracking risks real illegibility — two
+    # glyphs squeezed together can read as a different letter, which is
+    # exactly how a first, symmetrically-tightened version of this
+    # clamp turned 'Bad' into something RapidOCR read back as 'Stue' on
+    # this project's own golden fixture. Positive (expanding) tracking
+    # has no such failure mode — spaced-out glyphs stay individually
+    # legible, they just look loose — so it can be bounded far more
+    # aggressively without that risk. The compression side keeps the
+    # original, already-proven -8% bound; the expansion side is what a
+    # real plan actually needed tightening (Arial substituting for a
+    # narrower house font needed enough width correction that the old
+    # +50% bound rendered short room names as visibly gapped-out
+    # letters) — solve_horizontal_scale picks up the rest of an
+    # expansion-direction gap this tighter bound leaves behind.
+    return float(np.clip(tracking_em, -0.08, 0.15))
+
+
+def solve_horizontal_scale(
+    natural_width: float, target_width: float, min_scale: float = 0.96, max_scale: float = 1.25
+) -> float:
+    """How much to horizontally stretch or compress a naturally-tracked
+    render to close whatever gap remains to the measured target width.
+
+    Also asymmetric, for the same reason ``solve_tracking``'s clamp is
+    (see its docstring): compressing risks squeezing glyphs into
+    illegibility, expanding does not. ``min_scale`` stays close to 1 —
+    a bounded amount of compression is safe, much is not — while
+    ``max_scale`` allows real room for a substitute font that's
+    genuinely narrower than the original to expand toward it, reading
+    as a font's own proportions (the same idea as a "Condensed" or
+    "Expanded" variant) rather than as stretched inter-letter gaps.
+    """
+    if natural_width <= 0:
+        return 1.0
+    return float(np.clip(target_width / natural_width, min_scale, max_scale))
 
 
 def font_measure_width(text: str, font_path: str, px_size: int, tracking_px: float) -> float:
@@ -266,6 +301,8 @@ def fit_style(
 
     px_size = fit_font_size(text, across, font_path)
     tracking = solve_tracking(text, font_path, px_size, along)
+    natural_tracked = font_measure_width(text, font_path, px_size, tracking * px_size)
+    width_scale = solve_horizontal_scale(natural_tracked, along)
 
     return TextStyle(
         font_path=font_path,
@@ -275,4 +312,5 @@ def fit_style(
         paper=paper,
         cap_height_px=across,
         ink_along_px=along,
+        width_scale=width_scale,
     )
