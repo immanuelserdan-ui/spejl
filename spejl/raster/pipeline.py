@@ -27,6 +27,7 @@ from spejl.style.metrics import (
     TextStyle,
     fit_style,
     font_measure_width,
+    measure_ink_center,
     solve_horizontal_scale,
     solve_tracking,
 )
@@ -179,7 +180,20 @@ def mirror_raster(
 
         other_boxes = [d.bbox for d in detections if d is not det]
         style = fit_style(image, result.text, det.bbox, det.angle_deg, other_boxes=other_boxes)
-        out_bbox = M.mirror_bbox(det.bbox, w, h, axis)
+        # The raw detection box's own centre is not necessarily where the
+        # WORD itself centres — dash-noise from a crossing reference line
+        # (or any other one-sided contamination measure_ink_extent already
+        # excludes when fitting size) pads one edge of the box further
+        # than the other, and mirroring that off-centre raw box turns a
+        # small bias in the source into a visible one in the output.
+        # measure_ink_center reuses the same filtered ink-cluster analysis
+        # fit_style just used for sizing, so the anchor reflects the same
+        # ink the render is actually fitted to.
+        center_src = measure_ink_center(
+            image, det.bbox, det.angle_deg, other_boxes=other_boxes,
+            expected_glyphs=len(result.text),
+        )
+        center_out = M.mirror_point(center_src[0], center_src[1], w, h, axis)
         runs.append(
             MirroredRun(
                 text=result.text,
@@ -188,8 +202,8 @@ def mirror_raster(
                 conf=det.conf,
                 angle_src=det.angle_deg,
                 angle_out=M.mirror_angle(det.angle_deg, axis),
-                center_src=M.bbox_center(det.bbox),
-                center_out=M.bbox_center(out_bbox),
+                center_src=center_src,
+                center_out=center_out,
                 bbox_src=det.bbox,
                 style=style,
                 flags=run_flags,

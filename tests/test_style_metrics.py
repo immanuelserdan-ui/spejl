@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 import pytest
 
-from spejl.style.metrics import fit_font_size, measure_ink_extent, resolve_font
+from spejl.style.metrics import fit_font_size, measure_ink_center, measure_ink_extent, resolve_font
 
 
 @pytest.fixture(scope="module")
@@ -193,3 +193,41 @@ def test_a_wall_touching_the_crops_edge_is_dropped_even_when_neither_other_filte
 
     assert unguarded[1] == pytest.approx(40.0)  # wall sets across to the full crop height
     assert guarded[1] == pytest.approx(24.0, abs=2.0)  # letters' own true height, wall excluded
+
+
+def test_measure_ink_center_ignores_asymmetric_contamination():
+    """Regression: a real plan's '---Entre' detection box was padded
+    much further on its LEFT edge than its right (dash-noise from a
+    crossing reference line, the same contamination
+    _drop_sparse_linework's door-jamb case is), so the RAW box's own
+    geometric centre sat measurably left of where the word 'Entre'
+    itself actually centres. The pipeline used to anchor the re-render
+    on that raw centre — mirroring turned a small leftward bias in the
+    source into a visible RIGHTWARD one in the output, crowding the
+    label against the wrong wall of its own room.
+
+    measure_ink_center must report the ACTUAL glyph cluster's centre,
+    not the padded box's — matching measure_ink_extent's own long-
+    standing reasoning for why it measures ink instead of trusting the
+    box for size, applied here to position instead.
+    """
+    image = np.full((40, 80, 3), 255, np.uint8)
+    cv2.rectangle(image, (5, 0), (20, 38), (0, 0, 0), 1)      # sparse jamb, LEFT side only
+    cv2.rectangle(image, (35, 10), (48, 30), (0, 0, 0), -1)   # real letter 1
+    cv2.rectangle(image, (52, 10), (65, 30), (0, 0, 0), -1)   # real letter 2
+
+    bbox = (0.0, 0.0, 80.0, 40.0)
+    raw_center_x = 40.0  # the box's own midpoint, pulled left by the jamb padding
+    true_center = measure_ink_center(image, bbox, angle_deg=0.0, expected_glyphs=2)
+
+    # The real letters span x=35..65 (centre 50.0) -- the corrected
+    # centre must land there, not at the raw box's midpoint.
+    assert true_center[0] > raw_center_x
+    assert true_center[0] == pytest.approx(50.0, abs=3.0)
+
+
+def test_measure_ink_center_falls_back_to_the_raw_box_when_no_ink_is_found():
+    image = np.full((20, 20, 3), 255, np.uint8)  # blank -- no ink anywhere
+    bbox = (0.0, 0.0, 20.0, 20.0)
+    center = measure_ink_center(image, bbox, angle_deg=0.0)
+    assert center == pytest.approx((10.0, 10.0))

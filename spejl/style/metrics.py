@@ -144,24 +144,91 @@ def measure_ink_extent(
     line the check above already catches, but just as much not a glyph.
     """
     raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
+    vertical = abs(angle_deg) > 45
+
+    def _fallback() -> tuple[float, float]:
+        # Use the ORIGINAL (unclamped) box, not the clamped one — a box
+        # that lies partly or wholly outside the image would otherwise
+        # collapse toward zero regardless of the box's real size, which
+        # used to hand fit_font_size a bogus ~1px target and produce an
+        # unreadably tiny font with no error raised.
+        bw = max(1.0, float(raw_x1 - raw_x0))
+        bh = max(1.0, float(raw_y1 - raw_y0))
+        return (bh, bw) if vertical else (bw, bh)
+
+    cluster = _measure_ink_cluster_bbox(image, bbox, angle_deg, other_boxes, expected_glyphs)
+    if cluster is None:
+        return _fallback()
+    gx0, gy0, gx1, gy1 = cluster
+    ink_w = max(1.0, gx1 - gx0)
+    ink_h = max(1.0, gy1 - gy0)
+    return (ink_h, ink_w) if vertical else (ink_w, ink_h)
+
+
+def measure_ink_center(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    other_boxes: list[tuple[float, float, float, float]] | None = None,
+    expected_glyphs: int = 0,
+) -> tuple[float, float]:
+    """The actual glyph ink's centre point, in absolute image
+    coordinates — not the raw detection box's own centre.
+
+    A detector's box is padded, and that padding is not always even on
+    every side: dash-noise from a crossing reference line prepended to
+    a room label's raw OCR read ('---Entre') pads the box's LEFT edge
+    much further out than its right, so the box's own geometric centre
+    sits measurably left of where the word 'Entre' actually visually
+    centres. Confirmed on a real plan: anchoring the re-render on that
+    raw centre reproduces the same lopsided offset — MIRRORED, which
+    turns a small leftward bias in the source into a rightward one in
+    the output, visibly off-centre in its own room relative to where
+    the word sat on the original drawing. Anchoring on the actual ink
+    cluster's own centre instead means the re-rendered word sits
+    exactly where the word itself was, regardless of what else the
+    detection box happened to pad around it.
+
+    Shares :func:`_measure_ink_cluster_bbox` with :func:`measure_ink_extent`
+    — same filtered, clustered ink extent, just reported as a centre
+    point instead of a size — and falls back to the raw box's own
+    centre under the same condition that function falls back to the raw
+    box's own size (no usable ink found).
+    """
+    cluster = _measure_ink_cluster_bbox(image, bbox, angle_deg, other_boxes, expected_glyphs)
+    if cluster is None:
+        x0, y0, x1, y1 = bbox
+        return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
+    gx0, gy0, gx1, gy1 = cluster
+    return ((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0)
+
+
+def _measure_ink_cluster_bbox(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    other_boxes: list[tuple[float, float, float, float]] | None,
+    expected_glyphs: int,
+) -> tuple[float, float, float, float] | None:
+    """The actual glyph ink's bounding box inside ``bbox``, in ABSOLUTE
+    image coordinates — or None when no usable ink was found (empty or
+    entirely out-of-bounds crop), leaving the caller to fall back to
+    the raw detection box.
+
+    Shared by :func:`measure_ink_extent` and :func:`measure_ink_center`:
+    both need the identical filtered, clustered ink extent — one
+    reports its size, the other its centre — so the connected-component
+    analysis and its three contamination filters live here once rather
+    than as two copies to keep in sync.
+    """
+    raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
     h, w = image.shape[:2]
     x0, y0 = max(0, raw_x0), max(0, raw_y0)
     x1, y1 = min(w, raw_x1), min(h, raw_y1)
     vertical = abs(angle_deg) > 45
 
-    def _fallback() -> tuple[float, float]:
-        # Use the ORIGINAL (unclamped) box, not x0..y1 — those are already
-        # clamped to the image, and for a box that lies partly or wholly
-        # outside it, the clamped deltas collapse toward zero regardless
-        # of the box's real size, which used to hand fit_font_size a
-        # bogus ~1px target and produce an unreadably tiny font with no
-        # error raised.
-        bw = max(1.0, float(raw_x1 - raw_x0))
-        bh = max(1.0, float(raw_y1 - raw_y0))
-        return (bh, bw) if vertical else (bw, bh)
-
     if x1 <= x0 or y1 <= y0:
-        return _fallback()
+        return None
 
     crop = image[y0:y1, x0:x1]
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
@@ -170,7 +237,7 @@ def measure_ink_extent(
     if other_boxes:
         _mask_out_other_boxes(ink, x0, y0, other_boxes)
     if not ink.any():
-        return _fallback()
+        return None
 
     ch, cw = ink.shape
     count, _labels, stats, _cent = cv2.connectedComponentsWithStats(ink, connectivity=8)
@@ -186,7 +253,7 @@ def measure_ink_extent(
         boxes.append((cx, cy, cx + cwid, cy + chgt, int(area)))
 
     if not boxes:
-        return _fallback()
+        return None
 
     # Only safe when at least as many components survived as the string
     # has characters — i.e. nothing suggests a real glyph is already
@@ -202,7 +269,7 @@ def measure_ink_extent(
         boxes = _drop_sparse_linework(boxes)
         boxes = _drop_edge_touching_intrusions(boxes, ch, cw, vertical)
         if not boxes:
-            return _fallback()
+            return None
 
     boxes = _main_glyph_cluster(boxes, ch, cw, vertical)
 
@@ -210,9 +277,7 @@ def measure_ink_extent(
     gy0 = min(b[1] for b in boxes)
     gx1 = max(b[2] for b in boxes)
     gy1 = max(b[3] for b in boxes)
-    ink_w = max(1.0, float(gx1 - gx0))
-    ink_h = max(1.0, float(gy1 - gy0))
-    return (ink_h, ink_w) if vertical else (ink_w, ink_h)
+    return (float(x0 + gx0), float(y0 + gy0), float(x0 + gx1), float(y0 + gy1))
 
 
 def _mask_out_other_boxes(
