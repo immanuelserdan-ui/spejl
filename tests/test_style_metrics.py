@@ -95,12 +95,16 @@ def test_a_wall_fused_with_the_runs_own_glyphs_is_left_unpruned():
     already fused with something else.
     """
     image = np.full((40, 80, 3), 255, np.uint8)
-    cv2.rectangle(image, (0, 10), (80, 32), (0, 0, 0), -1)    # wall fused with 2 digits
-    cv2.rectangle(image, (30, 0), (45, 8), (0, 0, 0), -1)     # a separate, real digit
-    cv2.rectangle(image, (30, 34), (45, 40), (0, 0, 0), -1)   # another separate, real digit
+    cv2.rectangle(image, (0, 12), (80, 27), (0, 0, 0), -1)    # wall fused with 2 digits
+    cv2.rectangle(image, (30, 0), (50, 10), (0, 0, 0), -1)    # a separate, real digit
+    cv2.rectangle(image, (30, 29), (50, 40), (0, 0, 0), -1)   # another separate, real digit
     # 3 disconnected components; the first spans nearly the full width
-    # (cwid=80) while the other two are compact (cwid=15) — exactly the
+    # (cwid=80) while the other two are compact (cwid=20) — exactly the
     # shape that WOULD get the wide one pruned if nothing stopped it.
+    # Sized so the two real digits still clear _core_candidates' own
+    # 8%-of-the-largest-component threshold (their area must be a
+    # sizeable fraction of the wall's, not a sliver), so this test
+    # continues to exercise the pruning path it's meant to.
 
     bbox = (0.0, 0.0, 80.0, 40.0)
     unguarded = measure_ink_extent(image, bbox, angle_deg=0.0)  # expected_glyphs=0: never prunes
@@ -114,3 +118,78 @@ def test_a_wall_fused_with_the_runs_own_glyphs_is_left_unpruned():
     pruned = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
     assert pruned != unguarded
     assert pruned[0] < unguarded[0]
+
+
+def test_real_glyphs_outnumbered_by_small_marks_are_not_wrongly_pruned():
+    """Regression: on the same real plan as 'Entre' (same project,
+    same dashed reference line), a garbled read of 'Vær. 3' ('--Vr.3')
+    crossed by that line had 5 tiny dash/dot fragments against only 4
+    real letter-ish components — contaminants OUTNUMBERING the glyphs
+    they're contaminating, the opposite ratio from the '4381'/'Entre'
+    cases the two outlier filters were built for.
+
+    Taking the median across all 9 components (as an earlier version of
+    this fix did) dragged the along-axis median down to the dashes' own
+    ~7px width, making the real (and simply average-width) 32px-wide
+    'r' glyph look like the oversized outlier and get wrongly dropped —
+    under-measuring the whole run and nearly breaking its render.
+
+    _core_candidates fixes this by excluding tiny-by-pixel-count
+    fragments from the median calculation itself (not just from the
+    final answer), so the median reflects only plausibly-glyph-sized
+    components regardless of how many small contaminants sit alongside
+    them.
+    """
+    image = np.full((34, 140, 3), 255, np.uint8)
+    # 4 real letters, deliberately uneven widths (24/32/11/23) --
+    # matching 'V'/'r'/[mid]/'3's own measured widths on the real plan.
+    cv2.rectangle(image, (10, 5), (34, 25), (0, 0, 0), -1)
+    cv2.rectangle(image, (40, 5), (72, 25), (0, 0, 0), -1)
+    cv2.rectangle(image, (78, 5), (89, 25), (0, 0, 0), -1)
+    cv2.rectangle(image, (95, 5), (118, 25), (0, 0, 0), -1)
+    # 5 tiny dash fragments (a crossing reference line), OUTNUMBERING
+    # the 4 real letters -- sitting in their own row so they stay
+    # disconnected components rather than touching any letter.
+    for dx0 in (0, 36, 74, 91, 120):
+        cv2.rectangle(image, (dx0, 28), (dx0 + 7, 29), (0, 0, 0), -1)
+
+    bbox = (0.0, 0.0, 140.0, 34.0)
+    along, _across = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
+
+    # The true letters span x=10..118 (108px). A wrongly-pruned run
+    # collapses to whichever single narrow component survived (as low
+    # as 11px) -- so demand the measurement reflect all 4 real letters,
+    # not a fragment of them.
+    assert along > 90.0
+
+
+def test_a_wall_touching_the_crops_edge_is_dropped_even_when_neither_other_filter_catches_it():
+    """Regression: on the same real plan, 'Depot's detection box has a
+    wall stroke running along its left edge -- moderate width (not an
+    outlier vs. its siblings' along-axis extent) and solidly filled
+    (not sparse like the door-jamb near 'Entre'), so it tripped NEITHER
+    _drop_foreign_strokes NOR _drop_sparse_linework. Being the single
+    largest component by bounding-box area, it still became the glyph
+    cluster's anchor and, since it spanned the crop's full height,
+    single-handedly set the measured cap height to the full crop height
+    -- fitting a font a third larger than every sibling room label.
+
+    The fix relies on this codebase's own stated assumption (see
+    measure_ink_extent's docstring): a detector's box is padded around
+    its own text, so real glyph ink should never reach the crop edge.
+    Something that DOES touch the cross-baseline edge is presumed to be
+    linework continuing beyond the box, regardless of its width or
+    fill ratio.
+    """
+    image = np.full((40, 100, 3), 255, np.uint8)
+    cv2.rectangle(image, (0, 0), (20, 40), (0, 0, 0), -1)     # wall: touches top AND bottom
+    cv2.rectangle(image, (30, 8), (45, 32), (0, 0, 0), -1)    # 3 real letters, comfortably
+    cv2.rectangle(image, (50, 8), (65, 32), (0, 0, 0), -1)    # inset from every crop edge
+    cv2.rectangle(image, (70, 8), (85, 32), (0, 0, 0), -1)
+
+    bbox = (0.0, 0.0, 100.0, 40.0)
+    unguarded = measure_ink_extent(image, bbox, angle_deg=0.0)  # expected_glyphs=0: never prunes
+    guarded = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
+
+    assert unguarded[1] == pytest.approx(40.0)  # wall sets across to the full crop height
+    assert guarded[1] == pytest.approx(24.0, abs=2.0)  # letters' own true height, wall excluded

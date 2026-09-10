@@ -136,6 +136,12 @@ def measure_ink_extent(
     glyph cluster below — confirmed on a real plan where a vertical
     '4381' dimension's tight box clipped a corner of the 'Entre' label
     sitting right next to it.
+
+    Sparse architectural linework inside the box is excluded too (see
+    _drop_sparse_linework): a door-jamb symbol next to 'Entre' on that
+    same real plan spans the crop's full height but is mostly empty
+    space between its two thin strokes — not shaped like the dimension
+    line the check above already catches, but just as much not a glyph.
     """
     raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
     h, w = image.shape[:2]
@@ -168,7 +174,7 @@ def measure_ink_extent(
 
     ch, cw = ink.shape
     count, _labels, stats, _cent = cv2.connectedComponentsWithStats(ink, connectivity=8)
-    boxes: list[tuple[int, int, int, int]] = []
+    boxes: list[tuple[int, int, int, int, int]] = []
     for i in range(1, count):
         cx, cy, cwid, chgt, area = stats[i]
         if area < 2:
@@ -177,7 +183,7 @@ def measure_ink_extent(
         elongated = cwid > chgt * 8 or chgt > cwid * 8
         if spans_box and elongated:
             continue  # a rule or dimension line, not a glyph
-        boxes.append((cx, cy, cx + cwid, cy + chgt))
+        boxes.append((cx, cy, cx + cwid, cy + chgt, int(area)))
 
     if not boxes:
         return _fallback()
@@ -193,6 +199,8 @@ def measure_ink_extent(
     # recoverable via the render-time shrink-to-fit guard.
     if expected_glyphs and len(boxes) >= expected_glyphs:
         boxes = _drop_foreign_strokes(boxes, vertical)
+        boxes = _drop_sparse_linework(boxes)
+        boxes = _drop_edge_touching_intrusions(boxes, ch, cw, vertical)
         if not boxes:
             return _fallback()
 
@@ -227,9 +235,36 @@ def _mask_out_other_boxes(
             ink[ly0:ly1, lx0:lx1] = 0
 
 
+def _core_candidates(
+    boxes: list[tuple[int, int, int, int, int]],
+) -> list[tuple[int, int, int, int, int]]:
+    """The subset of ``boxes`` big enough, by true pixel count, to
+    plausibly be one of the run's own glyphs rather than a stray dash,
+    dot, or reference-line fragment mixed in among them.
+
+    Used as the reference POOL for a median by both outlier filters
+    below — not as a final answer on its own. A handful of small
+    contaminants can otherwise drag a median far enough off-centre that
+    an ordinary, correctly-sized real glyph looks like the outlier
+    instead (confirmed on a real plan's '--Vr.3': 5 tiny dash/dot
+    fragments outnumbered its 4 real letter-ish components, and taking
+    the median across all 9 wrongly flagged one of the real letters in
+    both filters below — see each one's docstring for which direction).
+
+    Same 8%-of-the-largest-component threshold :func:`_main_glyph_cluster`
+    already uses for the same "sliver vs. real letter part" judgment.
+    """
+    if not boxes:
+        return boxes
+    anchor_area = max(b[4] for b in boxes)
+    min_area = max(1, round(anchor_area * 0.08))
+    core = [b for b in boxes if b[4] >= min_area]
+    return core or boxes
+
+
 def _drop_foreign_strokes(
-    boxes: list[tuple[int, int, int, int]], vertical: bool
-) -> list[tuple[int, int, int, int]]:
+    boxes: list[tuple[int, int, int, int, int]], vertical: bool
+) -> list[tuple[int, int, int, int, int]]:
     """Drop a component whose extent ALONG the reading direction dwarfs
     its siblings' — the signature of a foreign stroke (a wall or
     reference line clipping the edge of the detection box) rather than
@@ -265,14 +300,25 @@ def _drop_foreign_strokes(
     largest component there would discard real digit ink with no way
     to recover it, which is strictly worse than the over-measurement
     this function exists to fix.
+
+    The median is taken from :func:`_core_candidates`, not every
+    surviving box: confirmed on the SAME project's '--Vr.3' (a garbled
+    OCR read crossed by the same kind of dashed reference line as
+    'Entre' — see _drop_sparse_linework), where 5 tiny dash/dot
+    fragments outnumbered the 4 real letter-ish components. Taking the
+    median across all 9 dragged it down to the dashes' own width, which
+    made the real (and merely average-width) 'r' glyph look like the
+    oversized outlier and get wrongly dropped — under-measuring the run
+    and nearly breaking its render, the same shape of regression '3306'
+    caught for the sibling filter below.
     """
     if len(boxes) <= 2:
         return boxes  # too few siblings for "dwarfs the others" to mean anything
 
-    def along_span(b: tuple[int, int, int, int]) -> int:
+    def along_span(b: tuple[int, int, int, int, int]) -> int:
         return (b[3] - b[1]) if vertical else (b[2] - b[0])
 
-    spans = sorted(along_span(b) for b in boxes)
+    spans = sorted(along_span(b) for b in _core_candidates(boxes))
     median = spans[len(spans) // 2]
     if median <= 0:
         return boxes
@@ -280,9 +326,105 @@ def _drop_foreign_strokes(
     return kept or boxes  # never discard every candidate outright
 
 
+def _drop_sparse_linework(
+    boxes: list[tuple[int, int, int, int, int]],
+) -> list[tuple[int, int, int, int, int]]:
+    """Drop a component whose FILL RATIO — actual ink pixels divided by
+    its own bounding-box area — is far sparser than its siblings'.
+
+    A real glyph is a comparatively solid shape: even a hollow letter
+    like 'O' or a thin stroke like '1' fills a substantial fraction of
+    its own tight bounding box (confirmed across this run's own siblings
+    below, all 35-61%). A door-jamb symbol — two thin parallel strokes
+    with open space between them, exactly the shape architectural plans
+    draw next to a doorway — is nothing like that: mostly empty box.
+
+    Confirmed on a real plan: a door-jamb symbol sitting right next to
+    'Entre' had a bounding box tall enough to span the ENTIRE detection
+    crop (fill ratio 9.5%, against 35-61% for 'Entre's own five
+    letters). Neither existing filter catches it — it's not elongated
+    enough on one axis to trip measure_ink_extent's own rule-line check,
+    and unlike a wall clipping a ROTATED (vertical) run, this sits
+    beside ordinary HORIZONTAL text, so _drop_foreign_strokes's
+    along-baseline (here: X-axis, the reading direction) comparison
+    never sees it as an outlier — the jamb symbol's problem is its
+    HEIGHT (the cross-baseline axis), which that filter deliberately
+    leaves alone since letters legitimately vary there (ascenders,
+    descenders). Being the tallest component, it single-handedly set
+    the cluster's measured cap height to the full crop height, fitting
+    a font roughly a third larger than every sibling room label on the
+    same sheet.
+
+    Same median-relative, self-calibrating shape as
+    :func:`_drop_foreign_strokes`, and gated by the same
+    ``expected_glyphs`` precondition at the call site for the same
+    reason: a fused component's fill ratio can't be trusted either.
+
+    The median comes from :func:`_core_candidates`, not every surviving
+    box — and here the direction of the failure this guards against is
+    the OPPOSITE of _drop_foreign_strokes's: a handful of solid, fully-
+    filled dash fragments (fill ratio 1.0, being nothing but ink in a
+    box the same size as themselves) can outnumber the run's own
+    letters and drag the median UP rather than down, making a
+    perfectly ordinary letter look sparse by comparison and get wrongly
+    dropped — confirmed on the SAME '--Vr.3' case _drop_foreign_strokes
+    documents: without this exclusion, its own 'V' (fill 0.36) and
+    another real letter (fill 0.37) both fell under a dash-inflated
+    threshold and were dropped alongside the dashes.
+    """
+    if len(boxes) <= 2:
+        return boxes
+
+    def fill_ratio(b: tuple[int, int, int, int, int]) -> float:
+        box_area = max(1, (b[2] - b[0]) * (b[3] - b[1]))
+        return b[4] / box_area
+
+    fills = sorted(fill_ratio(b) for b in _core_candidates(boxes))
+    median = fills[len(fills) // 2]
+    if median <= 0:
+        return boxes
+    kept = [b for b in boxes if fill_ratio(b) >= median * 0.4]
+    return kept or boxes  # never discard every candidate outright
+
+
+def _drop_edge_touching_intrusions(
+    boxes: list[tuple[int, int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
+) -> list[tuple[int, int, int, int, int]]:
+    """Drop a component that touches the crop boundary on the CROSS-
+    baseline axis — the top or bottom edge for horizontal text, the
+    left or right edge for vertical text.
+
+    measure_ink_extent's own docstring states the assumption this relies
+    on: a detector's box is *padded* around its own text, specifically
+    so a fixed ink-to-box constant would over-estimate cap height. Real
+    glyph ink therefore has room on every side and should never reach
+    the crop's edge exactly; something that DOES touch an edge is, by
+    that same assumption, linework that continues beyond the box rather
+    than a self-contained glyph — confirmed on a real plan's 'Depot',
+    where a wall stroke (moderate width, moderate fill — not an outlier
+    by EITHER of the two filters above) touched both the top and bottom
+    of the crop and, being the single largest component by bounding-box
+    area, set the cluster's measured cap height to the full crop height.
+
+    Deliberately axis-specific, the same way _drop_foreign_strokes is:
+    a real glyph's ALONG-baseline edges (left/right of a horizontal
+    word, top/bottom of a vertical dimension) legitimately sit close to
+    the box edge — that's just where the first or last character is —
+    so only the cross-baseline edges are checked.
+    """
+    if len(boxes) <= 2:
+        return boxes
+
+    def touches_cross_edge(b: tuple[int, int, int, int, int]) -> bool:
+        return (b[0] <= 0 or b[2] >= crop_width) if vertical else (b[1] <= 0 or b[3] >= crop_height)
+
+    kept = [b for b in boxes if not touches_cross_edge(b)]
+    return kept or boxes  # never discard every candidate outright
+
+
 def _main_glyph_cluster(
-    boxes: list[tuple[int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
-) -> list[tuple[int, int, int, int]]:
+    boxes: list[tuple[int, int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
+) -> list[tuple[int, int, int, int, int]]:
     """Keep only the components that form one word's own glyphs, and
     drop anything sitting in a detection box that isn't actually part
     of it.
