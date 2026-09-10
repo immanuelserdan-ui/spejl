@@ -63,3 +63,40 @@ def test_render_run_reports_the_actual_ink_width_for_callers_to_check(font_path:
     canvas = np.full((100, 100, 3), 255, np.uint8)
     rendered = render_run(canvas, "44", (50, 50), 0.0, _style(font_path))
     assert rendered.ink_width > 0
+
+
+def test_a_run_that_overlaps_a_previously_rendered_run_is_flagged_collided(font_path: str):
+    """Regression: on a real plan, a mirrored '4381' dimension landed on
+    top of the 'Entre' room label. Neither run overlapped the original
+    linework, so the old collision check — which only ever compared
+    against a static linework mask — never fired for either one, and
+    both rendered "clean" while visibly overlapping on the canvas.
+
+    raster/pipeline.py passes the SAME mask object to every render_run()
+    call for a page; each call must stamp its own ink into it so the
+    next call sees it, turning the check into "against linework AND
+    every run already drawn," not just linework.
+    """
+    canvas = np.full((200, 200, 3), 255, np.uint8)
+    shared_mask = np.zeros((200, 200), np.uint8)
+
+    first = render_run(
+        canvas, "Entre", (100, 100), 0.0, _style(font_path), linework_mask=shared_mask
+    )
+    assert not first.collided  # nothing drawn yet — mask started empty
+
+    second = render_run(
+        canvas, "4381", (100, 100), 0.0, _style(font_path), linework_mask=shared_mask
+    )
+    assert second.collided  # lands squarely on top of the first run's ink
+
+
+def test_two_runs_far_apart_do_not_collide(font_path: str):
+    canvas = np.full((300, 300, 3), 255, np.uint8)
+    shared_mask = np.zeros((300, 300), np.uint8)
+
+    render_run(canvas, "Bad", (30, 30), 0.0, _style(font_path), linework_mask=shared_mask)
+    second = render_run(
+        canvas, "Stue", (250, 250), 0.0, _style(font_path), linework_mask=shared_mask
+    )
+    assert not second.collided

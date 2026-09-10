@@ -177,7 +177,8 @@ def mirror_raster(
         if result.warning:
             run_flags.append(Flag("implausible", result.warning, "warn"))
 
-        style = fit_style(image, result.text, det.bbox, det.angle_deg)
+        other_boxes = [d.bbox for d in detections if d is not det]
+        style = fit_style(image, result.text, det.bbox, det.angle_deg, other_boxes=other_boxes)
         out_bbox = M.mirror_bbox(det.bbox, w, h, axis)
         runs.append(
             MirroredRun(
@@ -211,6 +212,11 @@ def mirror_raster(
         _replace_unmirrored(flipped, image, region, w, h, axis)
 
     # ---- S7: re-render every run upright at its mirrored anchor -----------
+    # Passed by reference to every render_run() call below and mutated by
+    # each one (render/text.py stamps its own ink in after checking for a
+    # collision) — so run N is checked against the geometry AND every run
+    # 1..N-1 already drawn on this same canvas, not just the static
+    # linework it started as.
     lines = linework_mask_for(flipped, flipped_text_mask)
     for run in runs:
         run_target_size = _target_size(run)
@@ -249,7 +255,11 @@ def mirror_raster(
                 )
         if rendered.collided:
             run.flags.append(
-                Flag("collision", f"{run.text!r} overlaps linework after mirroring.", "warn")
+                Flag(
+                    "collision",
+                    f"{run.text!r} overlaps linework or another label after mirroring.",
+                    "warn",
+                )
             )
 
     cv2.imwrite(str(output_path), flipped)

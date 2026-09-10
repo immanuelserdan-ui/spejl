@@ -97,6 +97,12 @@ def render_run(
 
     ``target_size`` is the original run's (along, across) ink extent; when
     given, it drives the fit-to-box guard.
+
+    ``linework_mask``, if given, is mutated in place: this run's own ink
+    is stamped into it after the collision check, so a caller that passes
+    the *same* mask object to every run in a page (see raster/pipeline.py)
+    gets collision detection against every run rendered so far, not just
+    the static geometry the mask started with.
     """
     px_size, tracking = style.px_size, style.tracking  # tracking: em-relative
     shrunk = False
@@ -176,8 +182,20 @@ def _composite(
     if linework_mask is None:
         return False
     ink_here = (patch[:, :, 3] > 128)
-    lines_here = linework_mask[dy0:dy1, dx0:dx1] > 0
-    return bool(np.logical_and(ink_here, lines_here).any())
+    region_mask = linework_mask[dy0:dy1, dx0:dx1]  # a view, not a copy
+    lines_here = region_mask > 0
+    collided = bool(np.logical_and(ink_here, lines_here).any())
+    # Stamp this run's own ink into the shared mask before returning, so
+    # the *next* call (the next run rendered onto the same canvas) is
+    # checked against it too. Without this, two runs whose boxes overlap
+    # only each other — never the original linework — never collide with
+    # anything as far as either call can tell, and both render clean
+    # while silently overlapping on the canvas (confirmed on a real
+    # plan: a mirrored '4381' dimension landing on top of the 'Entre'
+    # label, with the pipeline's own collision flag staying silent
+    # because it only ever compared against linework).
+    region_mask[ink_here] = 255
+    return collided
 
 
 def linework_mask_for(image: np.ndarray, text_mask: np.ndarray) -> np.ndarray:

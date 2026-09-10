@@ -107,7 +107,11 @@ _PAPER_TOLERANCE = 14  # matches erase.clean.PAPER_TOLERANCE
 
 
 def measure_ink_extent(
-    image: np.ndarray, bbox: tuple[float, float, float, float], angle_deg: float
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    other_boxes: list[tuple[float, float, float, float]] | None = None,
+    expected_glyphs: int = 0,
 ) -> tuple[float, float]:
     """Measured (along-baseline, across-baseline) extent of actual glyph
     ink inside ``bbox``, in pixels.
@@ -122,6 +126,16 @@ def measure_ink_extent(
     the whole box; glyphs are compact. Without that filter, the run
     ``4060`` — which sits directly on its own dimension line — would
     measure as tall as the line is long.
+
+    ``other_boxes``, if given, are every OTHER run's own detection box —
+    the same exclusion erase.clean.build_text_mask already applies for
+    the same reason (see its docstring): real plans crowd runs only a
+    few pixels apart, close enough that one run's box clips the edge of
+    a neighbour's glyphs. Left in, that foreign ink becomes its own
+    connected component inside THIS crop and can be swept into the
+    glyph cluster below — confirmed on a real plan where a vertical
+    '4381' dimension's tight box clipped a corner of the 'Entre' label
+    sitting right next to it.
     """
     raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
     h, w = image.shape[:2]
@@ -147,6 +161,8 @@ def measure_ink_extent(
     gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
     paper = float(np.percentile(gray, 90))
     ink = (gray < paper - _PAPER_TOLERANCE).astype(np.uint8)
+    if other_boxes:
+        _mask_out_other_boxes(ink, x0, y0, other_boxes)
     if not ink.any():
         return _fallback()
 
@@ -166,6 +182,20 @@ def measure_ink_extent(
     if not boxes:
         return _fallback()
 
+    # Only safe when at least as many components survived as the string
+    # has characters — i.e. nothing suggests a real glyph is already
+    # fused with something else into one component. When a component
+    # count is short (see _drop_foreign_strokes's docstring for the
+    # '3306' case: a wall fused with two of its own digits, leaving only
+    # 3 components for 4 characters), dropping the largest one would
+    # throw away real glyph ink with no way to recover it — worse than
+    # leaving the measurement inflated, which is at least visible and
+    # recoverable via the render-time shrink-to-fit guard.
+    if expected_glyphs and len(boxes) >= expected_glyphs:
+        boxes = _drop_foreign_strokes(boxes, vertical)
+        if not boxes:
+            return _fallback()
+
     boxes = _main_glyph_cluster(boxes, ch, cw, vertical)
 
     gx0 = min(b[0] for b in boxes)
@@ -175,6 +205,79 @@ def measure_ink_extent(
     ink_w = max(1.0, float(gx1 - gx0))
     ink_h = max(1.0, float(gy1 - gy0))
     return (ink_h, ink_w) if vertical else (ink_w, ink_h)
+
+
+def _mask_out_other_boxes(
+    ink: np.ndarray,
+    crop_x0: int,
+    crop_y0: int,
+    other_boxes: list[tuple[float, float, float, float]],
+) -> None:
+    """Zero out, in place, any ``ink`` pixels that actually belong to
+    another run's own detection box (see measure_ink_extent's docstring
+    for why this matters — same failure mode erase.clean.build_text_mask
+    already guards against for erasure)."""
+    ch, cw = ink.shape
+    for ox0, oy0, ox1, oy1 in other_boxes:
+        lx0 = max(0, int(np.floor(ox0)) - crop_x0)
+        ly0 = max(0, int(np.floor(oy0)) - crop_y0)
+        lx1 = min(cw, int(np.ceil(ox1)) - crop_x0)
+        ly1 = min(ch, int(np.ceil(oy1)) - crop_y0)
+        if lx1 > lx0 and ly1 > ly0:
+            ink[ly0:ly1, lx0:lx1] = 0
+
+
+def _drop_foreign_strokes(
+    boxes: list[tuple[int, int, int, int]], vertical: bool
+) -> list[tuple[int, int, int, int]]:
+    """Drop a component whose extent ALONG the reading direction dwarfs
+    its siblings' — the signature of a foreign stroke (a wall or
+    reference line clipping the edge of the detection box) rather than
+    one of the run's own glyphs.
+
+    Every glyph in one OCR-detected run is drawn at the same font size,
+    so their along-baseline extents cluster tightly — digits in a
+    vertical dimension are all roughly the same height, letters in a
+    horizontal word are all roughly the same height too. A linework
+    intrusion has no such constraint. The existing elongation filter in
+    :func:`measure_ink_extent` already drops an axis-aligned rule or
+    dimension line, but a DIAGONAL wall clipping a rotated detection box
+    is neither long enough relative to the crop nor extreme enough in
+    aspect ratio to trip it — confirmed on a real plan, where a diagonal
+    partition wall entering a vertical '4381' dimension's tight box
+    produced a component 3x taller (along the reading direction) than
+    any of the run's own digits. Being the single largest component by
+    pixel count, it became :func:`_main_glyph_cluster`'s anchor and
+    dragged the whole cluster's measured extent out to match it, fitting
+    a font roughly double the size of every neighbouring dimension.
+
+    Comparing against the group's own median rather than a fixed pixel
+    threshold keeps this self-calibrating to whatever size this
+    particular run happens to be drawn at, instead of a magic number
+    tuned to one sheet's scale.
+
+    Only called when ``len(boxes) >= len(text)`` (see the call site in
+    measure_ink_extent): a component count that already falls short of
+    the character count is itself evidence that a real glyph is fused
+    with something else into one component — confirmed on the SAME
+    project's '3306', where a diagonal wall touching two of its own
+    digits left only 3 components for 4 characters. Dropping the
+    largest component there would discard real digit ink with no way
+    to recover it, which is strictly worse than the over-measurement
+    this function exists to fix.
+    """
+    if len(boxes) <= 2:
+        return boxes  # too few siblings for "dwarfs the others" to mean anything
+
+    def along_span(b: tuple[int, int, int, int]) -> int:
+        return (b[3] - b[1]) if vertical else (b[2] - b[0])
+
+    spans = sorted(along_span(b) for b in boxes)
+    median = spans[len(spans) // 2]
+    if median <= 0:
+        return boxes
+    kept = [b for b in boxes if along_span(b) <= median * 2.5]
+    return kept or boxes  # never discard every candidate outright
 
 
 def _main_glyph_cluster(
@@ -361,11 +464,21 @@ def fit_style(
     bbox: tuple[float, float, float, float],
     angle_deg: float,
     bold: bool = False,
+    other_boxes: list[tuple[float, float, float, float]] | None = None,
 ) -> TextStyle:
-    """Measure every number for one run — none are assumed."""
+    """Measure every number for one run — none are assumed.
+
+    ``other_boxes`` — every OTHER run's own detection box on this page —
+    is forwarded to :func:`measure_ink_extent` so a neighbour's ink
+    close enough to clip this run's box can't inflate its measured
+    extent. See that function's docstring for the real-plan case that
+    motivated it.
+    """
     font_path = resolve_font(bold=bold)
     ink, paper = measure_ink_and_paper(image, bbox)
-    along, across = measure_ink_extent(image, bbox, angle_deg)
+    along, across = measure_ink_extent(
+        image, bbox, angle_deg, other_boxes=other_boxes, expected_glyphs=len(text)
+    )
 
     px_size = fit_font_size(text, across, font_path)
     tracking = solve_tracking(text, font_path, px_size, along)
