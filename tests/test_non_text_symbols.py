@@ -14,7 +14,11 @@ import pytest
 
 from spejl.detect.ocr import Detection
 from spejl.models import Axis
-from spejl.raster.pipeline import _looks_like_a_graphical_symbol, mirror_raster
+from spejl.raster.pipeline import (
+    _looks_like_a_graphical_symbol,
+    _looks_like_the_wrong_script,
+    mirror_raster,
+)
 
 
 @pytest.mark.parametrize(
@@ -33,6 +37,22 @@ from spejl.raster.pipeline import _looks_like_a_graphical_symbol, mirror_raster
 )
 def test_looks_like_a_graphical_symbol(text: str, expected: bool):
     assert _looks_like_a_graphical_symbol(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("一", True),      # regression: RapidOCR hallucinated this CJK
+        ("Bad", False),    # ideograph from a stray mark near 'Bad' on a
+        ("Stue", False),   # real project drawing, at 0.50 confidence —
+        ("H*", False),     # Python's isalnum() counts it as alphanumeric,
+        ("あ", True),       # so _looks_like_a_graphical_symbol alone
+        ("市", True),       # does not catch it
+        ("Москва", True),  # Cyrillic never appears on a Danish plan either
+    ],
+)
+def test_looks_like_the_wrong_script(text: str, expected: bool):
+    assert _looks_like_the_wrong_script(text) is expected
 
 
 class _FixedBackend:
@@ -97,3 +117,28 @@ def test_symbol_pixels_pass_through_as_geometry_not_erased(tmp_path):
     # The vertical line, now mirrored to x' = 200-100 = 100, should still be dark.
     column = cv2.cvtColor(out[50:150, 95:105], cv2.COLOR_BGR2GRAY)
     assert column.min() < 100, "the symbol's own geometry was erased instead of passed through"
+
+
+def test_a_hallucinated_cjk_character_is_not_rendered_either(tmp_path):
+    """Same failure mode as the arrow, different trigger: RapidOCR
+    hallucinating a CJK ideograph from a stray mark near real text —
+    confirmed on a real project drawing, near 'Bad', at 0.50 confidence.
+    """
+    img = np.full((300, 400, 3), 255, np.uint8)
+    cv2.putText(img, "Bad", (150, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+    src = tmp_path / "plan.png"
+    cv2.imwrite(str(src), img)
+
+    bad = Detection(text="Bad", quad=((148, 192), (178, 192), (178, 205), (148, 205)), conf=0.97)
+    hallucinated = Detection(
+        text="一", quad=((190, 195), (200, 195), (200, 205), (190, 205)), conf=0.50
+    )
+    backend = _FixedBackend([bad, hallucinated], base_size=(300, 400))
+
+    result = mirror_raster(src, tmp_path / "out.png", axis=Axis.VERTICAL, backend=backend)
+
+    texts = [r.text for r in result.runs]
+    assert "Bad" in texts
+    assert "一" not in texts
+    flag_codes = {f.code for p in result.document.pages for f in p.flags}
+    assert "non-text-symbol" in flag_codes

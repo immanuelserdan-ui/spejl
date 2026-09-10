@@ -84,6 +84,25 @@ def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
     if not text:
         return SnapResult(text="", raw=raw, kind="unknown", changed=False, confidence=0.0)
 
+    # Strip leading/trailing dash-family noise before anything else. Real
+    # plans routinely run a dashed reference line (a ceiling-height or
+    # ownership-boundary line) straight through a room, and confirmed on
+    # a real project's own drawing: RapidOCR reads a fragment of that
+    # dashed line sitting right next to a label as literal leading
+    # characters prepended to the room name — '---Entre', '-Kokken'.
+    # Left in, that noise is enough to dodge Tier 1's exact-match guard
+    # below (the whole point of which is to stop fuzzy matching from
+    # resolving a room name to the WRONG lexicon twin) without being
+    # different enough to trip Tier 2's unambiguous fold match either,
+    # so it falls through to Tier 3 fuzzy matching and can pick the
+    # wrong one anyway — confirmed: '---Entre' resolved to 'Entré'
+    # instead of plain 'Entre'. No real Danish room label or dimension
+    # starts or ends with a bare dash, so stripping this is safe; a
+    # MEANINGFUL hyphen (the "Vaer.-1" room-number-suffix case) sits
+    # between two other characters, never at either edge, so it is
+    # untouched by an edge-only strip.
+    text = text.strip("-‐‑‒–—―")
+
     rooms, abbrev, annotations = _vocabulary()
 
     # Dimensions and areas are numeric — never run them past a word list.

@@ -83,6 +83,49 @@ def test_unknown_string_is_reported_not_guessed():
     assert result.text == "Qzxwv"  # returned unchanged, never invented
 
 
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("---Entre", "Entre"),   # regression: a dashed reference line on a
+        ("-Kokken", "Køkken"),   # real drawing crosses near/through a label;
+        ("--Bad", "Bad"),        # RapidOCR reads a fragment of it as leading
+        ("Toilet--", "Toilet"),  # dash characters prepended (or appended) to
+    ],                           # the room name it detected
+)
+def test_dash_noise_from_a_crossing_reference_line_is_stripped(raw: str, expected: str):
+    """Regression: real project drawing 722-0553-0006-1001 uses dashed
+    reference lines running through several rooms. OCR read '---Entre'
+    for the room labelled 'Entre' — enough noise to dodge Tier 1's
+    exact-match guard (the point of which is to stop fuzzy matching
+    picking the WRONG lexicon twin) without being different enough to
+    hit Tier 2's unambiguous fold match either, so it fell through to
+    Tier 3 fuzzy matching and resolved to 'Entré' instead of the plain
+    'Entre' the drawing actually says. Stripped before any tier runs.
+    """
+    result = snap(raw)
+    assert result.text == expected
+
+
+def test_kaelderrum_is_not_truncated_to_kaelder():
+    """Regression: OCR on a real project drawing read 'Kaelderrum'
+    (basement STORAGE ROOM) perfectly, needing only diacritic
+    restoration — but 'Kælderrum' was missing from the lexicon while
+    the shorter, related 'Kælder' (basement) was present, so Tier 3
+    fuzzy matching confidently substituted the wrong, shorter word for
+    a correctly-read longer one. A closed vocabulary needs both real
+    words present, not just one standing in for its relative."""
+    assert snap("Kaelderrum").text == "Kælderrum"
+    assert snap("Kaelder").text == "Kælder"  # the distinct, shorter word is unaffected
+
+
+def test_meaningful_internal_hyphen_survives_the_edge_only_strip():
+    """The dash-noise strip only touches the string's edges — a
+    hyphen used as a real separator (the 'Vaer.-1' room-number-suffix
+    case, also a real OCR misread) sits between two other characters
+    and must still resolve correctly."""
+    assert snap("Vaer.-1").text == "Vær. 1"
+
+
 @pytest.mark.parametrize("raw", ["entre", "ENTRE", "eNtRe"])
 def test_case_only_difference_resolves_to_the_matching_entry_not_its_accented_twin(raw: str):
     """Regression: 'Entre' and 'Entré' both fold to the same key, so a

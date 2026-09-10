@@ -137,14 +137,16 @@ def mirror_raster(
         if _inside_any(det.bbox, protected):
             continue  # handled with the protected regions, not as text
 
-        if _looks_like_a_graphical_symbol(det.text):
-            # A detection with no letters or digits at all (an arrow, a
-            # bullet, a stray dash) is almost certainly OCR mis-firing
-            # on a drafting symbol rather than reading real text — the
-            # concrete case that motivated this: a '→' direction arrow
-            # detected at 0.50 confidence, no lexicon match, then
-            # erased and re-rendered as garbled text overlapping a real
-            # room label on mirror. Left out of both the erase list and
+        if _looks_like_a_graphical_symbol(det.text) or _looks_like_the_wrong_script(det.text):
+            # Either signal means the same thing downstream: this is
+            # almost certainly OCR mis-firing, not real text, whether
+            # that is a drafting symbol read as characters (no letters
+            # or digits at all — a '→' direction arrow detected at 0.50
+            # confidence, no lexicon match, then erased and re-rendered
+            # as garbled text overlapping a real room label) or a
+            # hallucinated character from the wrong script entirely (a
+            # stray mark read as a CJK ideograph, same confidence range,
+            # same failure mode). Left out of both the erase list and
             # `runs` entirely, so it passes through as ordinary
             # geometry — mirrored correctly along with every other line
             # on the sheet, the same as a north arrow that HASN'T been
@@ -367,6 +369,37 @@ def _looks_like_a_graphical_symbol(text: str) -> bool:
     lexicon/erase/render path.
     """
     return not any(ch.isalnum() for ch in text)
+
+
+# CJK Unified Ideographs, Hiragana/Katakana, Hangul, Cyrillic, Hebrew,
+# Arabic — ranges no Danish plan's own text ever legitimately uses.
+_NON_LATIN_RANGES = (
+    (0x0400, 0x04FF),  # Cyrillic
+    (0x0590, 0x08FF),  # Hebrew, Arabic
+    (0x2E80, 0x9FFF),  # CJK radicals through CJK Unified Ideographs
+    (0x3040, 0x30FF),  # Hiragana, Katakana
+    (0xAC00, 0xD7A3),  # Hangul syllables
+)
+
+
+def _looks_like_the_wrong_script(text: str) -> bool:
+    """True if any character falls in a script no Danish plan's own
+    text ever legitimately uses.
+
+    RapidOCR's recognition model is trained on mixed Latin+CJK data
+    (its own model filename says as much: ch_PP-OCRv4), and it can
+    hallucinate a single CJK character from an ambiguous, ink-adjacent
+    mark — confirmed on a real project drawing: a short vertical stroke
+    near 'Bad' was read as U+4E00 ('one') at 0.50 confidence. Python's
+    `str.isalnum()` — what :func:`_looks_like_a_graphical_symbol` checks
+    — classifies CJK ideographs as alphanumeric, so that filter alone
+    does not catch this; the wrong-script check is a separate,
+    deliberately narrow net for exactly this failure mode, not a
+    broader language guess.
+    """
+    return any(
+        any(lo <= ord(ch) <= hi for lo, hi in _NON_LATIN_RANGES) for ch in text
+    )
 
 
 def _inside_any(
