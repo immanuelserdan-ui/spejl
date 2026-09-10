@@ -45,6 +45,34 @@ runs on a background thread so the window stays responsive during OCR.
 python -m spejl.gui       # or: spejl-app, once installed
 ```
 
+**Packaged as a standalone .exe** — no Python install needed to run it:
+
+```bash
+pip install pyinstaller
+pyinstaller spejl.spec --noconfirm
+```
+
+Produces `dist/Spejl/Spejl.exe` (~375 MB — PySide6 + OpenCV + the OCR
+model weights). Not `--onefile`: that would unpack ~375 MB to a temp
+folder on every launch, so this ships as a folder with the exe inside
+it, the standard shape for a Windows desktop app of this size (a
+Desktop shortcut gives the double-click experience without that
+penalty). `spejl.spec` documents the two things a naive
+`pyinstaller app_launcher.py` would have silently gotten wrong:
+RapidOCR's ONNX model weights and `spejl/lexicon/da_dk.json` are
+package *data*, not Python source, so PyInstaller's import analysis
+never finds them on its own — the build would succeed and the app
+would open, then fail the moment someone actually tried to mirror a
+raster image. Verified by running the real OCR pipeline (both routes,
+against the golden fixture) from inside a frozen build before
+shipping — see the build session's log for the console-mode proof.
+
+One licensing note before distributing this *outside* the team:
+PyMuPDF (Route A) is dual-licensed AGPL-3.0 / commercial. Fine bundled
+into an internal tool; a commercial license (or a swap to the BSD/
+Apache-licensed `pypdfium2`) is needed before shipping the exe to
+anyone outside the organisation.
+
 Reviewed and code-reviewed before this build: 21 candidate bugs found
 across 4 parallel review passes plus empirical stress-testing, 17
 confirmed and fixed (each with a regression test), 4 checked and
