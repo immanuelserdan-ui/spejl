@@ -19,6 +19,10 @@ from spejl.lexicon.snap import snap
         ("Vaer. 1", "Vær. 1"),     # ... with the room number preserved
         ("Kokken ", "Køkken"),     # trailing whitespace
         ("Vaerelse", "Værelse"),
+        ("Vaer.-1", "Vær. 1"),     # regression: real-plan OCR misread the
+                                   # space before the room number as a
+                                   # hyphen; must still split and correct
+        ("Vaer.‑1", "Vær. 1"),  # non-breaking hyphen variant too
     ],
 )
 def test_diacritics_are_restored(raw: str, expected: str):

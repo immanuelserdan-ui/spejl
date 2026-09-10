@@ -160,8 +160,19 @@ def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
 
 
 def _split_trailing_number(text: str) -> tuple[str, str, str]:
-    """``"Vaer. 1"`` -> ``("Vaer.", " ", "1")``; ``"Stue"`` -> ``("Stue", "", "")``."""
-    m = re.match(r"^(.*?)(\s+)(\d+)$", text)
+    """``"Vaer. 1"`` -> ``("Vaer.", " ", "1")``; ``"Stue"`` -> ``("Stue", "", "")``.
+
+    The separator before the number is normalised to a single space on
+    the way out, not preserved verbatim: OCR on a real (non-synthetic)
+    plan misread "Vær. 1"'s space as a hyphen — "Vaer.-1" — and the
+    original whitespace-only pattern didn't match that at all, so the
+    whole string fell through as one unsplit token with no lexicon
+    match. A room-number suffix is a drafting convention, not a
+    hyphenated compound word, so any run of space/hyphen/en-dash
+    characters here is read as that separator and rewritten as a plain
+    space, regardless of which one OCR happened to produce.
+    """
+    m = re.match(r"^(.*?)[\s\-‐-―]+(\d+)$", text)
     if m:
-        return m.group(1), m.group(2), m.group(3)
+        return m.group(1), " ", m.group(2)
     return text, "", ""

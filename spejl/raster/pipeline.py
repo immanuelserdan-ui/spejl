@@ -125,10 +125,37 @@ def mirror_raster(
 
     # ---- S3 + S4: correct the strings, measure the type -------------------
     runs: list[MirroredRun] = []
+    text_boxes: list[tuple[float, float, float, float]] = []
+    non_text_flags: list[Flag] = []
     for det in detections:
         if _inside_any(det.bbox, protected):
             continue  # handled with the protected regions, not as text
 
+        if _looks_like_a_graphical_symbol(det.text):
+            # A detection with no letters or digits at all (an arrow, a
+            # bullet, a stray dash) is almost certainly OCR mis-firing
+            # on a drafting symbol rather than reading real text — the
+            # concrete case that motivated this: a '→' direction arrow
+            # detected at 0.50 confidence, no lexicon match, then
+            # erased and re-rendered as garbled text overlapping a real
+            # room label on mirror. Left out of both the erase list and
+            # `runs` entirely, so it passes through as ordinary
+            # geometry — mirrored correctly along with every other line
+            # on the sheet, the same as a north arrow that HASN'T been
+            # explicitly protected, rather than being destroyed and
+            # replaced with a nonsense string. Flagged so a human can
+            # confirm nothing meaningful was actually lost.
+            non_text_flags.append(
+                Flag(
+                    "non-text-symbol",
+                    f"{det.text!r} (OCR confidence {det.conf:.2f}) looks like a "
+                    "drafting symbol, not text — left as geometry, not re-rendered.",
+                    "info",
+                )
+            )
+            continue
+
+        text_boxes.append(det.bbox)
         result = snap(det.text)
         run_flags: list[Flag] = []
         if det.conf < LOW_CONFIDENCE:
@@ -161,8 +188,9 @@ def mirror_raster(
         )
 
     # ---- S5: erase the type, repair the linework it covered ---------------
-    erased = erase_text(image, [d.bbox for d in detections if not _inside_any(d.bbox, protected)])
+    erased = erase_text(image, text_boxes)
     flags.extend(erased.flags)
+    flags.extend(non_text_flags)
 
     # ---- S6: flip the type-free plate ------------------------------------
     flipped = M.flip_image(erased.image, axis)
@@ -242,6 +270,19 @@ def _target_size(run: MirroredRun) -> tuple[float, float]:
     if abs(run.angle_src) > 45:  # vertical: baseline runs down the box
         return (y1 - y0, x1 - x0)
     return (x1 - x0, y1 - y0)
+
+
+def _looks_like_a_graphical_symbol(text: str) -> bool:
+    """True for a detection with no letters or digits at all.
+
+    That's the signature of an OCR engine mis-firing on a drafting
+    symbol — an arrow, a bullet, a stray dash — rather than reading
+    real text. Deliberately permissive otherwise: any run with even one
+    alphanumeric character (including a real annotation glyph like
+    'H*', which has one) is treated as text and goes through the normal
+    lexicon/erase/render path.
+    """
+    return not any(ch.isalnum() for ch in text)
 
 
 def _inside_any(
