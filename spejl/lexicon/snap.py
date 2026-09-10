@@ -190,8 +190,16 @@ def _split_trailing_number(text: str) -> tuple[str, str, str]:
     hyphenated compound word, so any run of space/hyphen/en-dash
     characters here is read as that separator and rewritten as a plain
     space, regardless of which one OCR happened to produce.
+
+    The separator is optional (``*``, not ``+``), not just multi-form:
+    on the same real plan, "Vær. 3" came back "Vr.3" — OCR dropped "æ"
+    outright rather than just its diacritic, and with nothing between
+    the abbreviation's own period and the room number, there was no
+    separator character at all to require. A room label never ends in
+    a bare digit on its own account, so a trailing digit run is always
+    this suffix, separator or not.
     """
-    m = re.match(r"^(.*?)[\s\-‐-―]+(\d+)$", text)
+    m = re.match(r"^(.*?)[\s\-‐-―]*(\d+)$", text)
     if m:
         return m.group(1), " ", m.group(2)
     return text, "", ""

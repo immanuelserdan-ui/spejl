@@ -158,3 +158,36 @@ def test_abbreviation_with_a_diacritic_is_reachable():
     _rooms, abbrev, _annotations = _vocabulary()
     assert "vær" not in abbrev  # the broken plain-.casefold() key (æ kept)
     assert _fold("Vær") in abbrev  # the correct _fold()-consistent key (æ->ae)
+
+
+def test_room_number_glued_directly_to_the_abbreviation_still_splits():
+    """Regression: real-plan OCR on 'Vær. 3' dropped the 'æ' outright
+    (not just its diacritic) AND left no separator at all between the
+    abbreviation's own period and the room number — '--Vr.3' after the
+    dash-noise strip. _split_trailing_number's original pattern required
+    at least one space/hyphen separator, so this fell through unsplit as
+    one token, and 'Vr.3' as a whole matched nothing in any tier —
+    genuinely different from the 'Vaer.-1' regression above (that one
+    DOES have a separator, just a misread one).
+
+    A room label never legitimately ends in a bare digit on its own
+    account, so treating any trailing digit run as this suffix —
+    separator or not — is safe.
+    """
+    result = snap("--Vr.3")
+    assert result.text == "Vær. 3"
+    assert result.kind == "room"
+    assert result.warning is None
+
+
+def test_vr_period_abbreviation_is_a_curated_lexicon_entry():
+    """'Vr.' is missing 'æ' entirely, not just its diacritic (WRatio
+    fuzzy score against 'Vær.' is 75, below the 82 min_score — correctly
+    too uncertain for Tier 3 to guess), so it needs an explicit
+    abbreviation entry, the same way 'Vær' and 'Vaer' are both already
+    curated variants of the identical word for the identical reason:
+    OCR corrupts the same abbreviation different ways across different
+    real plans."""
+    result = snap("Vr.")
+    assert result.text == "Vær."
+    assert result.kind == "room"
