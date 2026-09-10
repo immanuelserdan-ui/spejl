@@ -455,9 +455,10 @@ def _drop_sparse_linework(
 def _drop_edge_touching_intrusions(
     boxes: list[tuple[int, int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
 ) -> list[tuple[int, int, int, int, int]]:
-    """Drop a component that touches the crop boundary on the CROSS-
-    baseline axis — the top or bottom edge for horizontal text, the
-    left or right edge for vertical text.
+    """Drop — or, when it's too big to safely discard, CLIP — a
+    component that touches the crop boundary on the CROSS-baseline
+    axis: the top or bottom edge for horizontal text, the left or
+    right edge for vertical text.
 
     measure_ink_extent's own docstring states the assumption this relies
     on: a detector's box is *padded* around its own text, specifically
@@ -466,10 +467,25 @@ def _drop_edge_touching_intrusions(
     the crop's edge exactly; something that DOES touch an edge is, by
     that same assumption, linework that continues beyond the box rather
     than a self-contained glyph — confirmed on a real plan's 'Depot',
-    where a wall stroke (moderate width, moderate fill — not an outlier
-    by EITHER of the two filters above) touched both the top and bottom
-    of the crop and, being the single largest component by bounding-box
-    area, set the cluster's measured cap height to the full crop height.
+    where a wall stroke touched both the top and bottom of the crop
+    and, being the single largest component by bounding-box area, set
+    the cluster's measured cap height to the full crop height.
+
+    Dropping it outright is only safe when it's genuinely small
+    (comparable to noise, not to a letter): on that SAME 'Depot', the
+    wall isn't just adjacent to the 'D' — it's physically TOUCHING it,
+    fused into one connected component neither erosion nor any
+    component-level shape test can cleanly split. Dropping that fused
+    component wholesale (an earlier version of this fix did) discarded
+    'D' along with the wall, under-measuring the run's WIDTH and
+    forcing an unrelated render-time shrink nobody could see the cause
+    of. The area check below recognises when that's happening — a
+    component too big to be pure linework — and CLIPS its cross-axis
+    extent to match the run's own unambiguous letters instead of
+    discarding it: the wall's excess height/width is cut away, but
+    whatever of its along-baseline extent might be a real, fused-in
+    glyph is kept. A genuinely small edge-toucher (a stray mark, not a
+    fusion) still gets dropped outright, same as before.
 
     Deliberately axis-specific, the same way _drop_foreign_strokes is:
     a real glyph's ALONG-baseline edges (left/right of a horizontal
@@ -483,7 +499,30 @@ def _drop_edge_touching_intrusions(
     def touches_cross_edge(b: tuple[int, int, int, int, int]) -> bool:
         return (b[0] <= 0 or b[2] >= crop_width) if vertical else (b[1] <= 0 or b[3] >= crop_height)
 
-    kept = [b for b in boxes if not touches_cross_edge(b)]
+    interior = [b for b in boxes if not touches_cross_edge(b)]
+    if not interior:
+        return boxes  # every candidate touches an edge -- nothing trustworthy to clip against
+
+    if vertical:
+        interior_lo = min(b[0] for b in interior)
+        interior_hi = max(b[2] for b in interior)
+    else:
+        interior_lo = min(b[1] for b in interior)
+        interior_hi = max(b[3] for b in interior)
+
+    areas = sorted(b[4] for b in interior)
+    median_area = areas[len(areas) // 2]
+
+    kept = list(interior)
+    for b in boxes:
+        if not touches_cross_edge(b):
+            continue
+        if median_area > 0 and b[4] > median_area * 1.5:
+            if vertical:
+                kept.append((max(b[0], interior_lo), b[1], min(b[2], interior_hi), b[3], b[4]))
+            else:
+                kept.append((b[0], max(b[1], interior_lo), b[2], min(b[3], interior_hi), b[4]))
+        # else: small enough to be pure linework or stray noise -- drop it.
     return kept or boxes  # never discard every candidate outright
 
 

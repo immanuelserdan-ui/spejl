@@ -231,3 +231,43 @@ def test_measure_ink_center_falls_back_to_the_raw_box_when_no_ink_is_found():
     bbox = (0.0, 0.0, 20.0, 20.0)
     center = measure_ink_center(image, bbox, angle_deg=0.0)
     assert center == pytest.approx((10.0, 10.0))
+
+
+def test_a_glyph_fused_with_an_edge_touching_wall_is_clipped_not_dropped():
+    """Regression: on the same real plan, 'Depot's own 'D' is physically
+    TOUCHING the wall beside it -- not merely adjacent like the door-jamb
+    near 'Entre', fused into one connected component no component-level
+    shape test (nor, confirmed separately, a small erosion) can cleanly
+    split. Dropping that fused component outright (what an earlier
+    version of _drop_edge_touching_intrusions did, correctly fixing the
+    HEIGHT-inflation bug that motivated it) also discarded 'D' along
+    with the wall, undermeasuring the run's WIDTH (69px instead of the
+    true ~96px) and forcing an unrelated render-time shrink -- 'Depot'
+    rendered visibly smaller than 'Gang'/'Kælderrum' right next to it,
+    with no flag pointing at why.
+
+    The fix: when an edge-touching component is too big to be pure
+    linework (compared against the run's own unambiguous letters), CLIP
+    its cross-axis extent to what those letters actually occupy instead
+    of discarding it outright -- the wall's excess height is cut away,
+    but whatever of its along-baseline extent is real, fused-in glyph
+    ink is kept. A genuinely small edge-toucher (noise, not a fusion)
+    still gets dropped outright, unaffected by this change.
+    """
+    image = np.full((44, 100, 3), 255, np.uint8)
+    # A wall fused with a letter -- touches both the top and bottom.
+    cv2.rectangle(image, (0, 0), (24, 44), (0, 0, 0), -1)
+    # 3 more real, unambiguous letters, well clear of every crop edge.
+    cv2.rectangle(image, (40, 10), (55, 34), (0, 0, 0), -1)
+    cv2.rectangle(image, (60, 10), (75, 34), (0, 0, 0), -1)
+    cv2.rectangle(image, (80, 10), (95, 34), (0, 0, 0), -1)
+
+    bbox = (0.0, 0.0, 100.0, 44.0)
+    along, across = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
+
+    # Height stays correct -- clipped to the real letters' own span, not
+    # the full 44px crop the wall alone would have set.
+    assert across == pytest.approx(24.0, abs=2.0)
+    # Width now reflects the fused component's contribution too, not
+    # just the 3 unambiguous letters (which alone would measure ~55px).
+    assert along > 80.0
