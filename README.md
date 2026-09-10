@@ -20,9 +20,28 @@ the page's vector geometry, and re-inserts every string upright at its
 mirrored, ISO-convention-correct anchor — no OCR, no reconstruction,
 no loss.
 
-Phase 2+ (Route B — OCR-based mirroring for raster PNG/JPEG input, the
-case a hand-photographed or exported floor plan image needs) is
-scoped in the build plan but not yet implemented.
+**Phase 2 detection is spiked and measured.** Route B's riskiest
+assumption — that OCR can read small rotated dimension text and Danish
+diacritics off a plan — is settled. Against the golden fixture, triple-
+pass detection plus the lexicon reaches **100% text recall, 100%
+character accuracy and 100% orientation accuracy at both 150 and 300
+dpi**, with mean anchor error 1.7 px. `pytest` enforces those as gates.
+
+Still to build for a working raster pipeline: erase + line repair (S5),
+the flip (S6, trivial), and re-render (S7).
+
+### Measuring detection yourself
+
+```bash
+python -m spejl.qa.fixture_gen --dpi 150 300     # fixture + ground truth
+python -m spejl.qa.score_ocr   --dpi 150 300     # the numbers
+```
+
+The fixture is drawn as vector and its ground truth is extracted from
+that same vector source, so annotation and image can never drift apart.
+`--single-pass` shows what the rotated passes buy: without them, all five
+vertical dimensions are mis-oriented and `2105` reads as `105` at 0.99
+confidence.
 
 ## Install
 

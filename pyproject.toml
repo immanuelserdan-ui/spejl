@@ -37,6 +37,9 @@ packages = ["spejl"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "slow: loads OCR models and runs three detection passes; deselect with -m 'not slow'",
+]
 
 [tool.ruff]
 line-length = 100

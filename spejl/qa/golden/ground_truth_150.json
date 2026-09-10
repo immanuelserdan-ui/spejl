@@ -1,0 +1,225 @@
+{
+  "image": "plan_150.png",
+  "dpi": 150,
+  "zoom": 2.0833,
+  "width_px": 1269,
+  "height_px": 1314,
+  "runs": [
+    {
+      "text": "Køkken",
+      "bbox_px": [
+        289.79,
+        303.96,
+        431.04,
+        361.21
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 41.2
+    },
+    {
+      "text": "Stue",
+      "bbox_px": [
+        802.98,
+        435.21,
+        888.69,
+        492.46
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 41.2
+    },
+    {
+      "text": "Vær. 1",
+      "bbox_px": [
+        272.54,
+        858.12,
+        397.58,
+        915.38
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 41.2
+    },
+    {
+      "text": "Entre",
+      "bbox_px": [
+        610.16,
+        1062.86,
+        684.84,
+        1105.8
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 30.9
+    },
+    {
+      "text": "Toilet",
+      "bbox_px": [
+        838.63,
+        988.37,
+        920.13,
+        1034.17
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 33.0
+    },
+    {
+      "text": "Bad",
+      "bbox_px": [
+        1056.81,
+        1119.62,
+        1116.11,
+        1165.42
+      ],
+      "angle_deg": 0,
+      "kind": "room",
+      "cap_height_px": 33.0
+    },
+    {
+      "text": "H*",
+      "bbox_px": [
+        145.37,
+        151.64,
+        175.46,
+        188.85
+      ],
+      "angle_deg": 0,
+      "kind": "annotation",
+      "cap_height_px": 26.8
+    },
+    {
+      "text": "2900",
+      "bbox_px": [
+        300.33,
+        141.54,
+        355.92,
+        175.89
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 24.7
+    },
+    {
+      "text": "4045",
+      "bbox_px": [
+        828.61,
+        141.54,
+        884.21,
+        175.89
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 24.7
+    },
+    {
+      "text": "2900",
+      "bbox_px": [
+        300.33,
+        1144.87,
+        355.92,
+        1179.23
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 24.7
+    },
+    {
+      "text": "1300",
+      "bbox_px": [
+        623.11,
+        917.49,
+        674.08,
+        948.98
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 22.7
+    },
+    {
+      "text": "1680",
+      "bbox_px": [
+        854.62,
+        1171.24,
+        905.59,
+        1202.73
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 22.7
+    },
+    {
+      "text": "870",
+      "bbox_px": [
+        1068.8,
+        1171.24,
+        1107.03,
+        1202.73
+      ],
+      "angle_deg": 0,
+      "kind": "dimension",
+      "cap_height_px": 22.7
+    },
+    {
+      "text": "3200",
+      "bbox_px": [
+        474.08,
+        322.2,
+        508.43,
+        377.8
+      ],
+      "angle_deg": 90,
+      "kind": "dimension",
+      "cap_height_px": 40.0
+    },
+    {
+      "text": "5155",
+      "bbox_px": [
+        1083.67,
+        464.75,
+        1118.02,
+        520.35
+      ],
+      "angle_deg": 90,
+      "kind": "dimension",
+      "cap_height_px": 40.0
+    },
+    {
+      "text": "4060",
+      "bbox_px": [
+        128.46,
+        873.45,
+        162.81,
+        929.05
+      ],
+      "angle_deg": 90,
+      "kind": "dimension",
+      "cap_height_px": 40.0
+    },
+    {
+      "text": "2105",
+      "bbox_px": [
+        764.28,
+        1018.32,
+        795.77,
+        1069.29
+      ],
+      "angle_deg": 90,
+      "kind": "dimension",
+      "cap_height_px": 36.7
+    },
+    {
+      "text": "1400",
+      "bbox_px": [
+        1071.99,
+        1069.72,
+        1103.48,
+        1120.69
+      ],
+      "angle_deg": 90,
+      "kind": "dimension",
+      "cap_height_px": 36.7
+    }
+  ]
+}
