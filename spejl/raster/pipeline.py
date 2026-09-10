@@ -11,7 +11,7 @@ with no type on it at all.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 import cv2
@@ -23,7 +23,13 @@ from spejl.erase.clean import erase_text
 from spejl.lexicon.snap import snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
 from spejl.render.text import linework_mask_for, render_run
-from spejl.style.metrics import TextStyle, fit_style
+from spejl.style.metrics import (
+    TextStyle,
+    fit_style,
+    font_measure_width,
+    solve_horizontal_scale,
+    solve_tracking,
+)
 from spejl.transform import mirror as M
 
 MIN_CAP_HEIGHT_PX = 14.0   # below this, upscale before OCR (build plan S1)
@@ -187,6 +193,8 @@ def mirror_raster(
             )
         )
 
+    _snap_consistent_sizes(runs)
+
     # ---- S5: erase the type, repair the linework it covered ---------------
     erased = erase_text(image, text_boxes)
     flags.extend(erased.flags)
@@ -254,6 +262,66 @@ def mirror_raster(
         )
     )
     return RasterResult(image=flipped, runs=runs, document=document, upscale=upscale)
+
+
+# Same-kind labels whose independently fitted sizes are this close are
+# treated as measurement noise around one intended size, not a real
+# difference — see _snap_consistent_sizes.
+_SIZE_CLUSTER_TOLERANCE = 0.12
+
+
+def _snap_consistent_sizes(runs: list[MirroredRun]) -> None:
+    """Real technical drawings draft room labels — and separately,
+    dimensions — at one of a small number of DISCRETE sizes, a drafting
+    convention, not a continuum. Every run's size is fit independently
+    from its own detected ink, necessarily, since nothing else can know
+    a label's true size without assuming one — but that independence
+    means ordinary OCR measurement noise (a pixel or two of difference
+    in one detected box's height) can make two labels that were
+    IDENTICAL on the original drawing come out at two visibly different
+    sizes after mirroring.
+
+    This groups same-KIND runs whose fitted sizes land close enough
+    together that the gap reads as noise rather than intent, and snaps
+    each such cluster to its own median — never merging clusters that
+    are genuinely far apart, which is exactly the case a real drawing
+    also uses on purpose (a large room's label bigger than a small
+    fixture room's). Tracking and width-scale are re-derived at the
+    snapped size rather than just overwritten alongside it, so a run
+    nudged to its cluster's size still hits its own measured target
+    width, not a stale one computed for its original size.
+    """
+    by_kind: dict[str, list[MirroredRun]] = {}
+    for run in runs:
+        if run.kind in ("room", "dimension"):
+            by_kind.setdefault(run.kind, []).append(run)
+
+    for group in by_kind.values():
+        ordered = sorted(group, key=lambda r: r.style.px_size)
+        cluster: list[MirroredRun] = []
+        for run in ordered:
+            if cluster and (run.style.px_size - cluster[-1].style.px_size) > (
+                _SIZE_CLUSTER_TOLERANCE * cluster[-1].style.px_size
+            ):
+                _snap_cluster_to_median(cluster)
+                cluster = []
+            cluster.append(run)
+        _snap_cluster_to_median(cluster)
+
+
+def _snap_cluster_to_median(cluster: list[MirroredRun]) -> None:
+    if len(cluster) < 2:
+        return
+    sizes = sorted(r.style.px_size for r in cluster)
+    median = sizes[len(sizes) // 2]
+    for run in cluster:
+        if run.style.px_size == median:
+            continue
+        old = run.style
+        tracking = solve_tracking(run.text, old.font_path, median, old.ink_along_px)
+        natural_tracked = font_measure_width(run.text, old.font_path, median, tracking * median)
+        width_scale = solve_horizontal_scale(natural_tracked, old.ink_along_px)
+        run.style = replace(old, px_size=median, tracking=tracking, width_scale=width_scale)
 
 
 def _target_size(run: MirroredRun) -> tuple[float, float]:
