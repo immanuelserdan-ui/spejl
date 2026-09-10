@@ -36,6 +36,24 @@ Command line:
 `python -m spejl.cli mirror <file>` routes automatically — vector PDF
 takes Route A, raster PNG/JPEG takes Route B.
 
+**Desktop app is built.** A drop zone, axis picker, and side-by-side
+before/after preview over the same `mirror_pdf` / `mirror_raster` the
+CLI calls — no separate implementation to drift out of sync. Mirroring
+runs on a background thread so the window stays responsive during OCR.
+
+```bash
+python -m spejl.gui       # or: spejl-app, once installed
+```
+
+Reviewed and code-reviewed before this build: 21 candidate bugs found
+across 4 parallel review passes plus empirical stress-testing, 17
+confirmed and fixed (each with a regression test), 4 checked and
+deliberately left as documented, currently-unreachable edge cases. The
+most serious was silent — every erase fill was landing ~3% darker than
+true paper due to a colour-quantisation bug, invisible at a glance but
+visible as faint ghost text at zoom. See `git log` for the full
+review-and-fix commit.
+
 ### Measuring detection yourself
 
 ```bash
@@ -54,7 +72,7 @@ confidence.
 ```powershell
 py -3.12 -m venv .venv
 .venv\Scripts\Activate.ps1
-pip install -e .
+pip install -e ".[raster,gui,dev]"
 ```
 
 ## Use
@@ -103,14 +121,23 @@ spejl/
 │   ├── fixture_gen.py     golden fixture with free ground truth (vector-drawn)
 │   ├── metrics.py         recall / char accuracy / anchor error scoring
 │   └── score_ocr.py       `python -m spejl.qa.score_ocr` — the go/no-go report
+├── gui/
+│   ├── main_window.py     the window: drop zone, axis picker, before/after
+│   ├── worker.py          runs mirror_pdf/mirror_raster off the UI thread
+│   ├── widgets.py         DropZone, ScaledImageLabel
+│   └── imaging.py         PDF/raster -> QPixmap for preview
 └── cli.py                 `spejl mirror ...` (routes A vs B automatically)
 tests/
 ├── test_pdf_mirror.py      Route A
 ├── test_transform.py       shared mirror math
 ├── test_lexicon.py         Danish diacritic + dimension-plausibility snap
 ├── test_detect_ocr.py      detection gates (marked slow — loads OCR models)
-└── test_raster_pipeline.py Route B round-trip: mirror -> OCR the output -> score
+├── test_raster_pipeline.py Route B round-trip: mirror -> OCR the output -> score
+├── test_erase_clean.py, test_style_metrics.py, test_render_text.py,
+│   test_rotations_merge.py, test_protected_regions.py, test_qa_metrics.py
+│                          edge cases from the code review pass
+└── test_gui.py             window construction and state-transition wiring
 docs/build-plan.html       the full blueprint (stack decision, roadmap,
                             edge cases, acceptance gates)
-demo/                       synthetic before/after pairs for a visual check
+demo/                       before/after pairs and the app screenshot
 ```

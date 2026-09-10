@@ -32,6 +32,9 @@ gui = [
 [project.scripts]
 spejl = "spejl.cli:app"
 
+[project.gui-scripts]
+spejl-app = "spejl.gui.__main__:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["spejl"]
 
