@@ -18,6 +18,8 @@ from PIL import Image, ImageDraw, ImageFont
 from spejl.style.metrics import (
     _map_point_from_straightened,
     _needs_rotated_measurement,
+    _refine_extreme_angle,
+    _straighten_and_measure,
     _straighten_crop,
     measure_ink_and_paper,
     measure_ink_center,
@@ -206,3 +208,56 @@ def test_a_sparse_component_spanning_the_crop_is_rejected_even_when_not_classica
     # the line itself would report if it survived into the cluster.
     assert along < 40
     assert across < 40
+
+
+def test_a_slightly_imprecise_angle_is_refined_to_level_the_baseline():
+    """Regression: the quad-derived angle feeding this whole rotated-
+    crop path can itself be off by a couple of degrees for a short,
+    steeply-angled run -- confirmed on two separate real dimension
+    numbers on two separate real files. Straightening '1383' at its
+    own detected 46.9deg left its four digits on a baseline that
+    drifts 2px top-to-bottom across the run, inflating the measured
+    across-extent from a true ~25px to 27px; straightening at 44.9deg
+    (a 2deg correction the run's own glyph alignment reveals directly)
+    levels the baseline and recovers the tighter measurement.
+
+    Reproduced synthetically here: four "glyph" blocks on a gentle
+    slope simulate what an imprecise angle leaves behind, and the
+    refinement must find a nearby angle that both tightens the
+    measured across-extent and keeps every block (never trading real
+    glyph content away for a smaller number).
+    """
+    canvas = np.full((200, 300, 3), 255, np.uint8)
+    cv2.rectangle(canvas, (80, 95), (100, 120), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (110, 96), (130, 121), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (140, 97), (160, 122), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (170, 98), (190, 123), (0, 0, 0), -1)
+    bbox = (70.0, 80.0, 200.0, 135.0)
+    angle_deg = 180.0  # claims "already level" -- the imprecise estimate
+
+    orig_along, orig_across = _straighten_and_measure(canvas, bbox, angle_deg, expected_glyphs=4)
+    refined_angle = _refine_extreme_angle(canvas, bbox, angle_deg, expected_glyphs=4)
+    assert refined_angle != angle_deg
+
+    refined_along, refined_across = _straighten_and_measure(
+        canvas, bbox, refined_angle, expected_glyphs=4
+    )
+    assert refined_across < orig_across  # baseline drift reduced
+    assert refined_along >= orig_along * 0.9  # no glyph content lost
+
+
+def test_refinement_falls_back_to_the_original_angle_when_nothing_improves():
+    """A cleanly axis-aligned run (already level, no drift to correct)
+    must not have its angle disturbed by the search -- every candidate
+    either ties or loses to the original, so the original is kept.
+    """
+    canvas = np.full((200, 300, 3), 255, np.uint8)
+    cv2.rectangle(canvas, (80, 100), (100, 125), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (110, 100), (130, 125), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (140, 100), (160, 125), (0, 0, 0), -1)
+    cv2.rectangle(canvas, (170, 100), (190, 125), (0, 0, 0), -1)
+    bbox = (70.0, 80.0, 200.0, 135.0)
+    angle_deg = 180.0
+
+    refined_angle = _refine_extreme_angle(canvas, bbox, angle_deg, expected_glyphs=4)
+    assert refined_angle == angle_deg

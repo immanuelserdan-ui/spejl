@@ -445,6 +445,93 @@ def _measure_extreme_angle(
     return along, across, center_x, center_y
 
 
+_ANGLE_REFINEMENT_SEARCH_DEG = 5.0
+_ANGLE_REFINEMENT_STEP_DEG = 0.5
+# The quad-derived angle feeding this whole rotated-crop path can itself
+# be off by a couple of degrees for a short, steeply-angled run — the
+# aspect-ratio floor (_MIN_ASPECT_FOR_QUAD_ANGLE, detect/rotations.py)
+# only guards against a quad too SQUARE to trust; it says nothing about
+# ordinary sub-degree noise in an elongated quad's own edges, and at
+# these angles that noise translates into a real, visible size error.
+# Confirmed on two separate real dimension numbers on two separate real
+# files: straightening '1383' at its own detected 46.9° left its four
+# digits on a baseline that drifts 2px top-to-bottom across the run —
+# each digit individually still measures full height, but the drift
+# alone inflates the UNION bounding box from a true ~25px to 27px.
+# Straightening at 44.9° instead (a 2° correction) levels the baseline
+# completely and drops the measurement back to 25px. The best angle is
+# knowable directly from what's already being measured: the CORRECT
+# straightening angle is whichever one packs this run's own glyphs into
+# the tightest cross-baseline (across) extent, since baseline drift can
+# only ever inflate that box, never shrink it. A small local search
+# around the detected angle, keeping whichever candidate ties or beats
+# every other on tightness (without losing real glyph content — a
+# candidate that shrinks the ALONG extent by more than 10% dropped a
+# character, not drift, and is rejected regardless of its own across
+# measurement) finds it directly, with no separate calibration constant
+# to get wrong. Confirmed on a second, independent real case ('1346',
+# a different file): the same search found a corrected angle that
+# additionally recovered a 4th digit component two fused digits had
+# been hiding at the originally detected angle.
+def _refine_extreme_angle(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    expected_glyphs: int,
+) -> float:
+    """The straightening angle, refined to minimise baseline-drift
+    inflation — see the module-level comment above this function for
+    the real data behind it. Falls back to ``angle_deg`` unchanged if
+    nothing in the search range does better, or if there isn't enough
+    ink to judge (a degenerate/empty crop) at all.
+    """
+    orig = _straighten_and_measure(image, bbox, angle_deg, expected_glyphs)
+    if orig is None:
+        return angle_deg
+    orig_along, orig_across = orig
+    if orig_along <= 0:
+        return angle_deg
+
+    best_angle, best_across = angle_deg, orig_across
+    delta = -_ANGLE_REFINEMENT_SEARCH_DEG
+    while delta <= _ANGLE_REFINEMENT_SEARCH_DEG + 1e-9:
+        if delta != 0.0:
+            candidate_angle = angle_deg + delta
+            measured = _straighten_and_measure(image, bbox, candidate_angle, expected_glyphs)
+            if measured is not None:
+                cand_along, cand_across = measured
+                if cand_along >= orig_along * 0.9 and cand_across < best_across:
+                    best_angle, best_across = candidate_angle, cand_across
+        delta += _ANGLE_REFINEMENT_STEP_DEG
+    return best_angle
+
+
+def _straighten_and_measure(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    expected_glyphs: int,
+) -> tuple[float, float] | None:
+    """Straighten once and report the measured cluster's own (along,
+    across) extent — the raw building block :func:`_refine_extreme_angle`
+    searches over. Deliberately NOT :func:`_straightened_cluster`
+    itself, which calls this function's refinement first: that would
+    recurse.
+    """
+    straightened = _straighten_crop(image, bbox, angle_deg)
+    if straightened is None:
+        return None
+    crop, _origin_x, _origin_y, _matrix = straightened
+    side = crop.shape[0]
+    cluster = _measure_ink_cluster_bbox(
+        crop, (0.0, 0.0, float(side), float(side)), 0.0, None, expected_glyphs
+    )
+    if cluster is None:
+        return None
+    x0, y0, x1, y1 = cluster
+    return x1 - x0, y1 - y0
+
+
 def _straightened_cluster(
     image: np.ndarray,
     bbox: tuple[float, float, float, float],
@@ -461,12 +548,17 @@ def _straightened_cluster(
     its own, distinct from the sizing problem this whole file exists
     to fix).
 
+    ``angle_deg`` is refined first (see :func:`_refine_extreme_angle`)
+    to correct for a possibly-imprecise upstream angle estimate before
+    ever cropping or measuring.
+
     Returns ``(straightened_crop, local_cluster_bbox, origin_x,
     origin_y, rotation_matrix)`` — ``local_cluster_bbox`` in the
     straightened crop's OWN local pixel coordinates, the rest as
     :func:`_straighten_crop` returns them, for mapping a point back to
     absolute image coordinates.
     """
+    angle_deg = _refine_extreme_angle(image, bbox, angle_deg, expected_glyphs)
     straightened = _straighten_crop(image, bbox, angle_deg)
     if straightened is None:
         return None
