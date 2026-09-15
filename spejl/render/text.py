@@ -27,6 +27,21 @@ from spejl.style.metrics import TextStyle, font_measure_width
 SUPERSAMPLE = 4
 OVERFLOW_TOLERANCE = 1.04
 
+# A proximity-based collision check (flagging text that comes within a
+# fixed margin of linework, not just literal pixel touching) was tried
+# here and reverted: a dimension number sitting close to — but not
+# touching — a nearby line is not actually unusual. It's the ORDINARY
+# case for a dimension number sitting close to its OWN dimension line,
+# which is exactly where drafting convention puts it. A fixed-distance
+# threshold has no way to tell "close to the line it labels" apart from
+# "close to something unrelated it shouldn't be near" — tested against
+# the real project corpus, it flagged the clear majority of ordinary,
+# correctly-placed dimension numbers on every file, and broke this
+# project's own golden-fixture regression test
+# (test_no_text_is_drawn_over_linework), which exists specifically to
+# confirm a clean render produces NO collision flags at all. Reverted;
+# exact pixel-touching stays the collision signal.
+
 
 @dataclass(frozen=True)
 class RenderedRun:
