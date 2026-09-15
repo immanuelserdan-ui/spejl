@@ -231,7 +231,7 @@ def erase_text(
 
     repaired = 0
     if lines_before is not None:
-        repaired = _restore_line_pixels(work, lines_before, mask)
+        repaired = _restore_line_pixels(work, lines_before, mask, boxes, dilate_px)
 
     return EraseResult(image=work, mask=mask, repaired_px=repaired, flags=tuple(flags))
 
@@ -257,16 +257,78 @@ def _looks_patterned(image: np.ndarray, box: tuple[int, int, int, int], ring_px:
     return bool(light.size > 0 and light.std() > 18)
 
 
+# A genuine wall or dimension line that happens to run under a label
+# continues into the surrounding sheet well past that one label — real
+# cases confirmed on 722-0553-0006-1016-T22-S extend 55 to 1428px beyond
+# the text box whose erasure exposed them (the outer wall outline, a
+# witness line under a dimension number). But a room label's OWN letter
+# strokes can independently satisfy line_pixel_mask's >=40px straight-run
+# detector once the sheet's own cap height clears it — confirmed on the
+# same file: 'Køkken' (cap height 54px) produced three separate 4-5px-
+# wide, 40px-tall components, one per straight vertical in 'K', 'k', 'k';
+# 'Bad' produced two, for 'B' and 'd'. Every one of them sits ENTIRELY
+# inside its own text box (worst case still 9px short of even reaching
+# the box edge) — before this fix, _restore_line_pixels painted them
+# straight back onto the erased canvas regardless, a ghost stroke under
+# every re-rendered glyph tall enough to trigger it ('Køkken' rendered as
+# a smeared 'Kølkken!', 'Bad' as 'Badl'). The two cases are cleanly
+# separable on this one signal — a real line already extends hundreds of
+# pixels past any single label; a letter stroke, by construction, never
+# leaves its own glyph's box at all — so 20px sits with wide margin on
+# both sides of the real data (29px above the worst false positive's own
+# containment, 35px below the smallest genuine extension observed).
+_MIN_LINE_EXTENSION_PX = 20.0
+
+
 def _restore_line_pixels(
-    image: np.ndarray, lines_before: np.ndarray, mask: np.ndarray
+    image: np.ndarray,
+    lines_before: np.ndarray,
+    mask: np.ndarray,
+    boxes: list[tuple[float, float, float, float]],
+    dilate_px: int,
 ) -> int:
     """Repaint exactly the long-line pixels that the erase removed.
 
     Only the intersection of (was linework) and (was erased) is touched,
     so a repair can never thicken, shift, or invent linework — it can
     only put back what was demonstrably there a moment ago.
+
+    Restricted to connected components of ``lines_before`` that actually
+    extend past at least one text box they overlap (see
+    ``_MIN_LINE_EXTENSION_PX``) — a component fully contained inside the
+    box it was found in is a glyph stroke line_pixel_mask mistook for
+    linework, not a real line the erase needs to repair.
     """
-    restore = cv2.bitwise_and(lines_before, mask)
+    num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
+        lines_before, connectivity=8
+    )
+    if num_labels <= 1:
+        return 0
+
+    h, w = mask.shape[:2]
+    genuine: set[int] = set()
+    for x0, y0, x1, y1 in boxes:
+        bx0 = max(0, int(np.floor(x0)) - dilate_px)
+        by0 = max(0, int(np.floor(y0)) - dilate_px)
+        bx1 = min(w, int(np.ceil(x1)) + dilate_px)
+        by1 = min(h, int(np.ceil(y1)) + dilate_px)
+        if bx1 <= bx0 or by1 <= by0:
+            continue
+        for lbl in np.unique(labels[by0:by1, bx0:bx1]):
+            if lbl == 0 or int(lbl) in genuine:
+                continue
+            lx, ly, lw, lh, _area = stats[lbl]
+            extension = max(
+                bx0 - lx, (lx + lw) - bx1, by0 - ly, (ly + lh) - by1
+            )
+            if extension > _MIN_LINE_EXTENSION_PX:
+                genuine.add(int(lbl))
+
+    if not genuine:
+        return 0
+
+    component_mask = np.isin(labels, list(genuine)).astype(np.uint8) * 255
+    restore = cv2.bitwise_and(component_mask, mask)
     count = int(np.count_nonzero(restore))
     if count:
         image[restore > 0] = _darkest_colour(image)

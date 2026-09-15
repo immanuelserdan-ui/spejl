@@ -4,7 +4,15 @@ from __future__ import annotations
 
 import numpy as np
 
-from spejl.erase.clean import _looks_patterned, _ring_modal_colour, build_text_mask, erase_text
+import cv2
+
+from spejl.erase.clean import (
+    _looks_patterned,
+    _ring_modal_colour,
+    build_text_mask,
+    erase_text,
+    line_pixel_mask,
+)
 
 
 def test_ring_colour_on_pure_white_is_pure_white_not_the_quantisation_floor():
@@ -35,8 +43,6 @@ def test_erased_text_region_returns_to_true_paper_not_a_darker_bucket():
     uniform, image-wide shift the mean catches cleanly.
     """
     img = np.full((80, 80, 3), 255, np.uint8)
-    import cv2
-
     cv2.putText(img, "Bad", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1.2, (0, 0, 0), 2, cv2.LINE_AA)
     box = (5, 20, 75, 60)
     result = erase_text(img, [box])
@@ -80,3 +86,54 @@ def test_ring_modal_colour_still_correct_after_the_shared_helper_refactor():
     img[box[1]:box[3], box[0]:box[2]] = 0
     colour = _ring_modal_colour(img, box)
     assert tuple(int(c) for c in colour) in {(240, 240, 240), (232, 232, 232)}
+
+
+def test_a_tall_narrow_stroke_fully_inside_its_own_box_is_not_restored():
+    """Regression: a room label's own letter strokes (a straight
+    full-height vertical, as in 'K'/'k'/'l'/'d'/'b'/'h') can independently
+    satisfy line_pixel_mask's own >=40px straight-run detector once the
+    sheet's cap height clears it — confirmed on a real plan: 'Køkken'
+    (cap height 54px) produced three separate components this way, one
+    per straight vertical stroke in 'K', 'k', 'k', each ENTIRELY inside
+    its own text box (never within 9px of the box's own edge). Before
+    this fix, _restore_line_pixels painted every one of them straight
+    back onto the erased canvas regardless — a ghost stroke rendered
+    right through the freshly re-drawn glyph ('Køkken' came out as a
+    smeared 'Kølkken!', 'Bad' as 'Badl'). A component that never extends
+    past its own box is exactly this failure mode, not a real line, and
+    must stay erased.
+    """
+    img = np.full((160, 200, 3), 255, np.uint8)
+    # A 3px-wide, 50px-tall vertical stroke — long enough (>40px) for
+    # line_pixel_mask's own detector — entirely inside the box below.
+    img[60:110, 50:53] = 0
+    box = (40.0, 55.0, 70.0, 115.0)  # comfortably contains the stroke
+
+    # Sanity check the test actually exercises the fix: line_pixel_mask
+    # must genuinely flag this stroke as "linework", the same false
+    # positive the real 'K'/'k'/'k' strokes produced.
+    assert np.count_nonzero(line_pixel_mask(img)[60:110, 50:53]) > 0
+
+    result = erase_text(img, [box])
+    assert result.repaired_px == 0
+    region = result.image[55:115, 40:70]
+    assert region.min() >= 250
+
+
+def test_a_line_that_extends_well_past_its_box_is_still_restored():
+    """The other side of the same mechanism: a genuine wall or dimension
+    line that happens to run under a label continues into the
+    surrounding sheet well past that one label — confirmed on a real
+    plan extending 55 to 1428px beyond the text box whose erasure
+    exposed it. This must still be repaired after the erase — the whole
+    point of line_pixel_mask/_restore_line_pixels in the first place,
+    and the case the fix above must not quietly break.
+    """
+    img = np.full((160, 200, 3), 255, np.uint8)
+    img[79:82, :] = 0  # a line spanning nearly the full width
+    box = (80.0, 70.0, 120.0, 90.0)  # sits in the middle of the line
+
+    result = erase_text(img, [box])
+    assert result.repaired_px > 0
+    # The line must reappear under where the box was.
+    assert result.image[80, 100].max() < 50
