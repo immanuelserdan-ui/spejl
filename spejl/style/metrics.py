@@ -9,6 +9,7 @@ wrong next to untouched linework.
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -69,14 +70,34 @@ def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
 
 
 def measure_ink_and_paper(
-    image: np.ndarray, bbox: tuple[float, float, float, float]
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float = 0.0,
+    expected_glyphs: int = 0,
 ) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
     """Ink = median of the darkest decile, paper = median of the lightest.
 
     Deciles rather than min/max: an antialiased glyph edge produces a
     continuum, and the extremes are outliers. This also handles grey
     annotation text and tinted backgrounds with no special case.
+
+    ``angle_deg``, when far enough from a cardinal (see
+    :func:`_needs_rotated_measurement`), switches the sample source to
+    a crop TIGHT around a straightened run's own found ink — see
+    :func:`_sample_extreme_angle_ink_paper`'s own docstring for a real,
+    confirmed bug this exact distinction (tight cluster crop, not the
+    whole generously padded straightened square) fixes: a dimension
+    number tilted ~45° had so little of its own (much larger, padded)
+    straightened crop covered by ink that the darkest-decile cut never
+    dipped below near-white, measuring ink colour as (255, 255, 255) —
+    the SAME as paper. The text was being positioned and sized
+    correctly; it was invisible, rendered in white ink on white paper.
     """
+    if _needs_rotated_measurement(angle_deg):
+        result = _sample_extreme_angle_ink_paper(image, bbox, angle_deg, expected_glyphs)
+        if result is not None:
+            return result
+
     x0, y0, x1, y1 = (int(round(v)) for v in bbox)
     h, w = image.shape[:2]
     x0, y0 = max(0, x0), max(0, y0)
@@ -84,7 +105,17 @@ def measure_ink_and_paper(
     if x1 <= x0 or y1 <= y0:
         return ((0, 0, 0), (255, 255, 255))
 
-    crop = image[y0:y1, x0:x1]
+    result = _sample_ink_and_paper(image[y0:y1, x0:x1])
+    return result if result is not None else ((0, 0, 0), (255, 255, 255))
+
+
+def _sample_ink_and_paper(
+    crop: np.ndarray,
+) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+    """The percentile sampling :func:`measure_ink_and_paper` does,
+    factored out so both the plain crop and the straightened-crop path
+    can share it. None if the crop has no usable dark/light split.
+    """
     if crop.ndim == 2:
         crop = np.dstack([crop] * 3)
     flat = crop.reshape(-1, 3).astype(np.float32)
@@ -95,7 +126,7 @@ def measure_ink_and_paper(
     dark = flat[luma <= dark_cut]
     light = flat[luma >= light_cut]
     if len(dark) == 0 or len(light) == 0:
-        return ((0, 0, 0), (255, 255, 255))
+        return None
 
     ink_bgr = np.median(dark, axis=0)
     paper_bgr = np.median(light, axis=0)
@@ -156,6 +187,16 @@ def measure_ink_extent(
         bh = max(1.0, float(raw_y1 - raw_y0))
         return (bh, bw) if vertical else (bw, bh)
 
+    if _needs_rotated_measurement(angle_deg):
+        extreme = _measure_extreme_angle(image, bbox, angle_deg, expected_glyphs)
+        if extreme is not None:
+            # Already correctly oriented -- measured directly along/across
+            # the run's OWN reading direction in the straightened frame,
+            # unlike the plain-crop path below, which measures in image
+            # axes and needs `vertical` to know which axis is which.
+            along, across, _cx, _cy = extreme
+            return along, across
+
     cluster = _measure_ink_cluster_bbox(image, bbox, angle_deg, other_boxes, expected_glyphs)
     if cluster is None:
         return _fallback()
@@ -194,13 +235,240 @@ def measure_ink_center(
     point instead of a size — and falls back to the raw box's own
     centre under the same condition that function falls back to the raw
     box's own size (no usable ink found).
+
+    For a run tilted far enough to need :func:`_measure_extreme_angle`
+    (see that function and :func:`_needs_rotated_measurement`), the
+    centre comes from there instead — mapped back through the SAME
+    rotation used to straighten the crop, so it lands at the run's own
+    true centre in absolute image coordinates either way.
     """
+    if _needs_rotated_measurement(angle_deg):
+        extreme = _measure_extreme_angle(image, bbox, angle_deg, expected_glyphs)
+        if extreme is not None:
+            _along, _across, cx, cy = extreme
+            return cx, cy
+
     cluster = _measure_ink_cluster_bbox(image, bbox, angle_deg, other_boxes, expected_glyphs)
     if cluster is None:
         x0, y0, x1, y1 = bbox
         return ((x0 + x1) / 2.0, (y0 + y1) / 2.0)
     gx0, gy0, gx1, gy1 = cluster
     return ((gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0)
+
+
+# How far a run's angle must sit from every cardinal (0/90/-90/180)
+# before an axis-aligned crop is abandoned in favour of a straightened
+# one. Below this, the existing axis-aligned measurement already works
+# well (every gentle wall-following tilt confirmed on a real plan
+# measured 5-9° and fit its sibling labels' size correctly once the
+# angle itself was resolved) — an axis-aligned box's excess padding
+# over the true rotated footprint grows with the tilt and only becomes
+# a real problem approaching 45°, not at a few degrees. Two real
+# dimension numbers at ~47° and ~131° confirmed the failure mode this
+# guards against: an axis-aligned crop at those angles is dominated by
+# empty corner padding, and _measure_ink_cluster_bbox's own filters —
+# built to reject a handful of stray marks, not a crop that is MOSTLY
+# not the run — can't rescue a measurement that starts from a crop this
+# inefficient. One of the two even measured ink colour as pure white
+# (identical to paper): with under 5% of the crop being real ink, the
+# darkest-decile percentile cut used to find ink colour never dipped
+# below near-white, so the text was correctly sized... in a colour
+# indistinguishable from the empty page around it.
+_ROTATED_CROP_MARGIN_DEG = 20.0
+
+
+def _needs_rotated_measurement(angle_deg: float) -> bool:
+    return all(
+        abs(angle_deg - cardinal) >= _ROTATED_CROP_MARGIN_DEG
+        for cardinal in (-180.0, -90.0, 0.0, 90.0, 180.0)
+    )
+
+
+def _straighten_crop(
+    image: np.ndarray, bbox: tuple[float, float, float, float], angle_deg: float
+) -> tuple[np.ndarray, float, float, np.ndarray] | None:
+    """A generously padded crop around ``bbox``, rotated so the run
+    reads left-to-right — straightened by the SAME rotation
+    (``180 - angle_deg``, not the more obvious ``-angle_deg``) that
+    :func:`spejl.render.text.render_run` implicitly undoes when it
+    later rotates a freshly-drawn horizontal tile BY ``angle_deg`` to
+    reproduce this same orientation. Confirmed empirically against two
+    independent real runs (one already axis-aligned-measurable at ~95°,
+    one only measurable through this function at ~131°) rather than
+    derived from first principles and trusted — ``-angle_deg`` reliably
+    produced upside-down, backwards text for both; ``180 - angle_deg``
+    reliably produced correct, upright text for both, in both PIL's
+    ``Image.rotate`` and cv2's ``getRotationMatrix2D`` (same sign
+    convention in both libraries here, once the correct base formula
+    was found).
+
+    Returns ``(straightened_image, origin_x, origin_y, rotation_matrix)``:
+    ``origin_x``/``origin_y`` is the padded crop's own top-left corner
+    in ORIGINAL image coordinates, BEFORE rotation — together with
+    ``rotation_matrix`` (the exact affine matrix applied), enough for
+    :func:`_map_point_from_straightened` to send a point found in the
+    straightened frame back to absolute image coordinates. None if
+    ``bbox`` is degenerate or lies entirely outside the image.
+    """
+    x0, y0, x1, y1 = bbox
+    if x1 <= x0 or y1 <= y0:
+        return None
+    cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
+    bw, bh = x1 - x0, y1 - y0
+    # Half the box's own diagonal, plus a fixed margin: generous enough
+    # that rotating a bw x bh box about its own centre never clips a
+    # corner, at any angle.
+    half = math.hypot(bw, bh) / 2.0 + 12.0
+    side = max(1, int(round(2 * half)))
+
+    ih, iw = image.shape[:2]
+    origin_x, origin_y = cx - half, cy - half
+    sx0, sy0 = int(round(origin_x)), int(round(origin_y))
+    cx0, cy0 = max(0, sx0), max(0, sy0)
+    cx1, cy1 = min(iw, sx0 + side), min(ih, sy0 + side)
+    if cx1 <= cx0 or cy1 <= cy0:
+        return None
+
+    extra_dims = image.shape[2:]
+    canvas = np.full((side, side, *extra_dims), 255, dtype=image.dtype)
+    canvas[cy0 - sy0 : cy1 - sy0, cx0 - sx0 : cx1 - sx0] = image[cy0:cy1, cx0:cx1]
+
+    rotation = 180.0 - angle_deg
+    matrix = cv2.getRotationMatrix2D((side / 2.0, side / 2.0), rotation, 1.0)
+    border = 255 if not extra_dims else (255,) * extra_dims[0]
+    straightened = cv2.warpAffine(
+        canvas, matrix, (side, side), flags=cv2.INTER_LINEAR, borderValue=border
+    )
+    return straightened, origin_x, origin_y, matrix
+
+
+def _map_point_from_straightened(
+    local_x: float, local_y: float, matrix: np.ndarray, origin_x: float, origin_y: float
+) -> tuple[float, float]:
+    """Send a point found in a straightened crop (from
+    :func:`_straighten_crop`) back to absolute image coordinates."""
+    inv = cv2.invertAffineTransform(matrix)
+    ux = inv[0, 0] * local_x + inv[0, 1] * local_y + inv[0, 2]
+    uy = inv[1, 0] * local_x + inv[1, 1] * local_y + inv[1, 2]
+    return origin_x + ux, origin_y + uy
+
+
+def _measure_extreme_angle(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    expected_glyphs: int,
+) -> tuple[float, float, float, float] | None:
+    """Measure a run tilted too far from any cardinal for the plain
+    axis-aligned path (see :func:`_needs_rotated_measurement`) by
+    straightening its crop first, instead of measuring in a crop
+    dominated by empty corner padding.
+
+    Returns ``(along_px, across_px, centre_x, centre_y)`` — the first
+    two already correctly oriented along the run's own reading
+    direction (no ``vertical`` swap needed, unlike the plain-crop
+    path), the last two in absolute image coordinates. None if nothing
+    usable was found, leaving the caller to fall back to the plain
+    axis-aligned measurement.
+
+    Reuses :func:`_measure_ink_cluster_bbox` — the SAME connected-
+    component analysis and contamination filters every other run gets
+    — by handing it the straightened crop as if it were an ordinary
+    ``angle_deg=0`` detection spanning the whole crop; the straightening
+    is what makes that crop tight around the real glyphs again, the
+    same way it already is for a genuinely horizontal run.
+
+    Neighbouring-box exclusion (``other_boxes`` elsewhere in this
+    module) is deliberately not threaded through here: a dimension
+    number tilted this far is reading along an isolated dimension
+    line, not crowded against another label the way a room name can
+    be, and transforming those boxes into the straightened crop's own
+    rotated frame for a case that has not shown a need for it is
+    complexity this fix does not need to carry yet.
+    """
+    result = _straightened_cluster(image, bbox, angle_deg, expected_glyphs)
+    if result is None:
+        return None
+    _crop, (gx0, gy0, gx1, gy1), origin_x, origin_y, matrix = result
+    along = max(1.0, gx1 - gx0)
+    across = max(1.0, gy1 - gy0)
+    local_cx, local_cy = (gx0 + gx1) / 2.0, (gy0 + gy1) / 2.0
+    center_x, center_y = _map_point_from_straightened(local_cx, local_cy, matrix, origin_x, origin_y)
+    return along, across, center_x, center_y
+
+
+def _straightened_cluster(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    expected_glyphs: int,
+) -> tuple[np.ndarray, tuple[float, float, float, float], float, float, np.ndarray] | None:
+    """Straighten the crop, then run the SAME connected-component
+    cluster analysis every other run gets — shared by
+    :func:`_measure_extreme_angle` (needs the size and centre) and
+    :func:`_sample_extreme_angle_ink_paper` (needs a crop TIGHT around
+    just the real ink, not the whole generously padded straightened
+    square — see that function's own docstring for why sampling ink
+    colour from the padded square itself is a real, confirmed bug of
+    its own, distinct from the sizing problem this whole file exists
+    to fix).
+
+    Returns ``(straightened_crop, local_cluster_bbox, origin_x,
+    origin_y, rotation_matrix)`` — ``local_cluster_bbox`` in the
+    straightened crop's OWN local pixel coordinates, the rest as
+    :func:`_straighten_crop` returns them, for mapping a point back to
+    absolute image coordinates.
+    """
+    straightened = _straighten_crop(image, bbox, angle_deg)
+    if straightened is None:
+        return None
+    crop, origin_x, origin_y, matrix = straightened
+    side = crop.shape[0]
+    cluster = _measure_ink_cluster_bbox(
+        crop, (0.0, 0.0, float(side), float(side)), 0.0, None, expected_glyphs
+    )
+    if cluster is None:
+        return None
+    return crop, cluster, origin_x, origin_y, matrix
+
+
+def _sample_extreme_angle_ink_paper(
+    image: np.ndarray,
+    bbox: tuple[float, float, float, float],
+    angle_deg: float,
+    expected_glyphs: int,
+) -> tuple[tuple[int, int, int], tuple[int, int, int]] | None:
+    """Ink/paper colour for a run tilted too far for the plain crop
+    (see :func:`_needs_rotated_measurement`), sampled from a crop TIGHT
+    around the found ink cluster — not the whole straightened square
+    :func:`_straighten_crop` returns.
+
+    That distinction is load-bearing, confirmed as a second, separate
+    real bug: the straightened square is deliberately padded generously
+    (half the run's own diagonal, so rotating it never clips a corner
+    at any angle) — appropriate for FINDING the ink, wrong for
+    SAMPLING its colour. On a real plan, well under 10% of that padded
+    square's pixels were ink; :func:`_sample_ink_and_paper`'s darkest-
+    decile cut landed in the white background instead of the actual
+    ink, measuring ink colour as pure white — identical to paper. The
+    run was being sized and positioned correctly by then; it was
+    rendering in a colour indistinguishable from the empty page around
+    it. A small margin around the cluster's own tight bounding box
+    keeps the crop this function samples from close to what a
+    genuinely axis-aligned run's own (already-tight) detection box
+    would give :func:`measure_ink_and_paper` directly.
+    """
+    result = _straightened_cluster(image, bbox, angle_deg, expected_glyphs)
+    if result is None:
+        return None
+    crop, (gx0, gy0, gx1, gy1), _origin_x, _origin_y, _matrix = result
+    ch, cw = crop.shape[:2]
+    margin = 4
+    lx0, ly0 = max(0, int(gx0) - margin), max(0, int(gy0) - margin)
+    lx1, ly1 = min(cw, int(gx1) + margin), min(ch, int(gy1) + margin)
+    if lx1 <= lx0 or ly1 <= ly0:
+        return None
+    return _sample_ink_and_paper(crop[ly0:ly1, lx0:lx1])
 
 
 def _measure_ink_cluster_bbox(
@@ -214,6 +482,24 @@ def _measure_ink_cluster_bbox(
     image coordinates — or None when no usable ink was found (empty or
     entirely out-of-bounds crop), leaving the caller to fall back to
     the raw detection box.
+
+    The initial rule/dimension-line rejection (below) also catches a
+    component that's SPARSE — not just the classically thin-and-long
+    ``elongated`` shape — for a real case the original check missed:
+    straightening a dimension line running through :func:`_measure_extreme_angle`'s
+    crop turns it, arrowheads included, into a component that spans
+    most of the crop's width but is no longer thin enough to read as
+    "elongated" (the arrowhead triangles at each end make it locally
+    tall) — confirmed on a real plan, where such a component (fill
+    ratio 0.14) escaped the elongation check entirely and, with too few
+    OTHER components surviving to satisfy the ``expected_glyphs`` gate
+    the three filters below share, was never caught by any of them
+    either, inflating a dimension number's measured size by nearly 3x.
+    A genuine glyph never drops this low — every component measured
+    across every real case this file's fixes are built on stayed above
+    0.3 fill, even a fused wall-and-digit blob (0.51, real ink raises
+    it) — so 0.2 stays a safe, unconditional floor un-gated by
+    ``expected_glyphs``, the same as the elongation check beside it.
 
     Shared by :func:`measure_ink_extent` and :func:`measure_ink_center`:
     both need the identical filtered, clustered ink extent — one
@@ -248,7 +534,8 @@ def _measure_ink_cluster_bbox(
             continue  # single-pixel speckle
         spans_box = cwid > cw * 0.8 or chgt > ch * 0.8
         elongated = cwid > chgt * 8 or chgt > cwid * 8
-        if spans_box and elongated:
+        sparse = (area / max(1, cwid * chgt)) < 0.2
+        if spans_box and (elongated or sparse):
             continue  # a rule or dimension line, not a glyph
         boxes.append((cx, cy, cx + cwid, cy + chgt, int(area)))
 
@@ -721,7 +1008,7 @@ def fit_style(
     motivated it.
     """
     font_path = resolve_font(bold=bold)
-    ink, paper = measure_ink_and_paper(image, bbox)
+    ink, paper = measure_ink_and_paper(image, bbox, angle_deg, expected_glyphs=len(text))
     along, across = measure_ink_extent(
         image, bbox, angle_deg, other_boxes=other_boxes, expected_glyphs=len(text)
     )
