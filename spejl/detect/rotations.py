@@ -42,17 +42,50 @@ _PASSES = (
 _MIN_ASPECT_FOR_QUAD_ANGLE = 1.5
 
 # A quad angle within this many degrees of a cardinal (0/90/-90/180) is
-# snapped to it outright, rather than kept as a suspiciously precise-
-# looking 1.2° or 2.2°: real architectural text is drawn EXACTLY
-# horizontal or vertical unless it deliberately follows a sloped wall,
-# and a sloped wall's own tilt is a real, physical, consistent angle,
-# not a fraction of a degree. Confirmed on a real plan: every genuinely
-# axis-aligned multi-character label measured under 2.5° of drift
-# (ordinary detection noise), while every label actually following a
-# diagonal wall measured 5-9° — both clusters found on the SAME sheet,
-# nowhere close enough to each other to risk one threshold confusing
-# them.
-_CANONICAL_SNAP_DEG = 3.0
+# snapped to it outright, no further questions asked: real architectural
+# text is drawn EXACTLY horizontal or vertical unless it deliberately
+# follows a sloped wall, and a sloped wall's own tilt is a real,
+# physical, consistent angle, not a fraction of a degree — every
+# axis-aligned multi-character label sampled across several real plans
+# measured under 2.5° of ordinary detection noise.
+#
+# A single fixed floor covering the WHOLE gap up to a genuine tilt
+# turned out not to hold, though: one specific word ('Gang', of all
+# things — recurring across three separate real files, so a property
+# of how that word's own quad measures, not a fluke of one detection)
+# measured as high as 5.96° of pure noise, overlapping the low end of
+# confirmed REAL tilts elsewhere (6.1°+) closely enough that no single
+# threshold in between reliably tells them apart. Beyond this floor,
+# _resolve_ambiguous_tilts below decides using a stronger signal than
+# magnitude alone: whether another, independent detection on the SAME
+# sheet corroborates a closely matching tilt — see its own docstring.
+_ALWAYS_SNAP_DEG = 3.0
+
+# Above this, a deviation from cardinal is treated as unambiguously a
+# real tilt without needing corroboration — matches
+# style/metrics._ROTATED_CROP_MARGIN_DEG, the point past which a run is
+# far enough from every cardinal that confusing it with ordinary
+# detection noise was never plausible to begin with.
+_UNAMBIGUOUS_TILT_DEG = 20.0
+
+# Two independent detections' deviations from the SAME cardinal must
+# agree within this many degrees of EACH OTHER to corroborate one
+# another.
+#
+# 2.0° was the first calibration, and it was wrong: 'Gang' and 'Stue'
+# (see _ALWAYS_SNAP_DEG's own comment — the same two noisy, unrelated
+# room labels) agree with EACH OTHER to within 1.28°, close enough to
+# pass a 2.0° tolerance and corroborate one another into looking like a
+# real shared tilt neither of them has. Every genuine connection in the
+# confirmed real cluster is tighter than that: the loosest link needed
+# to keep the whole three-run vertical family connected (3921 to 4381,
+# bridging the 1.20° gap from 3921 to 4504 directly) is 0.80°; the
+# horizontal family's own pair agrees to 0.60°. 1.0° sits with margin
+# on both sides of the ACTUAL worst cases on both sides (0.2° above the
+# tightest bridge a real cluster has needed, 0.28° below the noise
+# pair's own coincidental agreement) rather than a round number picked
+# without checking either boundary.
+_CORROBORATION_TOLERANCE_DEG = 1.0
 
 
 def _quad_angle_deg(quad: tuple[tuple[float, float], ...], fallback: float) -> float:
@@ -81,9 +114,13 @@ def _quad_angle_deg(quad: tuple[tuple[float, float], ...], fallback: float) -> f
     * Below ``_MIN_ASPECT_FOR_QUAD_ANGLE`` elongation, the quad is too
       close to square for an angle to mean anything — falls back to
       ``fallback`` (the detecting pass's own canonical angle).
-    * Within ``_CANONICAL_SNAP_DEG`` of a cardinal, snapped to it
-      outright — ordinary detection noise around a genuinely
-      axis-aligned run, not a real fractional-degree tilt.
+    * Within ``_ALWAYS_SNAP_DEG`` of a cardinal, snapped to it outright
+      — ordinary detection noise around a genuinely axis-aligned run,
+      not a real fractional-degree tilt. This alone isn't the whole
+      story for angles beyond that floor, though — see
+      :func:`_resolve_ambiguous_tilts`, applied afterwards in
+      :func:`detect_all_orientations`, for why a moderate deviation
+      still isn't trusted on its magnitude alone.
 
     The direction along the long edge is resolved with an
     axis-DOMINANT reading convention, deliberately NOT
@@ -123,7 +160,7 @@ def _quad_angle_deg(quad: tuple[tuple[float, float], ...], fallback: float) -> f
     angle = M.angle_from_direction(dx, dy)
 
     for cardinal in (-180.0, -90.0, 0.0, 90.0, 180.0):
-        if abs(angle - cardinal) < _CANONICAL_SNAP_DEG:
+        if abs(angle - cardinal) < _ALWAYS_SNAP_DEG:
             return cardinal
     return angle
 
@@ -242,6 +279,10 @@ def detect_all_orientations(
     near-horizontal, so it would pass a shape check against ITS OWN
     angle even though it is still a truncated, worse read of the same
     text a different pass got right in full.
+
+    :func:`_resolve_ambiguous_tilts` runs last, on the final merged
+    set — see its own docstring for why a single per-run magnitude
+    threshold isn't the whole story for a moderate tilt.
     """
     src_h, src_w = image.shape[:2]
     candidates: list[Detection] = []
@@ -260,7 +301,70 @@ def detect_all_orientations(
                 )
 
     merged = _merge(candidates, iou_threshold, dropped_out=dropped_out)
-    return [_canonicalise_vertical(d) for d in merged]
+    canonicalised = [_canonicalise_vertical(d) for d in merged]
+    return _resolve_ambiguous_tilts(canonicalised)
+
+
+def _nearest_cardinal_and_deviation(angle_deg: float) -> tuple[float, float]:
+    """The closest cardinal (0/90/-90/180) to ``angle_deg`` and the
+    SIGNED deviation (``angle_deg - cardinal``) from it."""
+    best_cardinal, best_dev = 0.0, angle_deg
+    for cardinal in (-180.0, -90.0, 0.0, 90.0, 180.0):
+        dev = angle_deg - cardinal
+        if abs(dev) < abs(best_dev):
+            best_cardinal, best_dev = cardinal, dev
+    return best_cardinal, best_dev
+
+
+def _resolve_ambiguous_tilts(detections: list[Detection]) -> list[Detection]:
+    """A moderate deviation from cardinal (between ``_ALWAYS_SNAP_DEG``
+    and ``_UNAMBIGUOUS_TILT_DEG`` — see both constants' own comments)
+    is trusted only when at least one OTHER detection on the SAME
+    sheet independently shows a closely matching deviation from the
+    SAME cardinal — not on its own magnitude clearing some fixed floor.
+
+    Why magnitude alone isn't enough: confirmed on three separate real
+    plans, one specific word ('Gang') measured its own quad angle as
+    high as 5.96° off true purely from detection noise — no diagonal
+    wall anywhere near it on any of the three files — overlapping the
+    low end of confirmed REAL tilts elsewhere (6.1°+) closely enough
+    that no single threshold reliably tells the two apart. But a
+    genuine tilt is never just one detection's opinion: every
+    dimension number actually following a sloped wall agreed closely
+    with its neighbours doing the same (three runs within 6.1-7.3° of
+    each other, two more within 6.8-7.4°) — because they are all
+    measuring the SAME physical slope. 'Gang' agreed with nothing
+    else on its own sheet at anything close to its own deviation,
+    because there was nothing else to agree with. Corroboration is
+    the signal magnitude alone can't provide: cheap to check (this
+    function runs once, on the small final per-page set, not per
+    candidate), and it only ever makes MORE detections un-ambiguous,
+    never fewer — a real tilt with no corroborating neighbour on this
+    sheet still falls back to the safe default (snapped to cardinal,
+    matching this run's own pre-quad-angle-fix behaviour) rather than
+    guessing.
+    """
+    ambiguous: list[tuple[int, float, float]] = []  # (index, cardinal, deviation)
+    for i, det in enumerate(detections):
+        cardinal, dev = _nearest_cardinal_and_deviation(det.angle_deg)
+        if _ALWAYS_SNAP_DEG <= abs(dev) < _UNAMBIGUOUS_TILT_DEG:
+            ambiguous.append((i, cardinal, dev))
+
+    corroborated: set[int] = set()
+    for a in range(len(ambiguous)):
+        i, cardinal_i, dev_i = ambiguous[a]
+        for b in range(a + 1, len(ambiguous)):
+            j, cardinal_j, dev_j = ambiguous[b]
+            if cardinal_i == cardinal_j and abs(dev_i - dev_j) <= _CORROBORATION_TOLERANCE_DEG:
+                corroborated.add(i)
+                corroborated.add(j)
+
+    resolved = list(detections)
+    for i, cardinal, _dev in ambiguous:
+        if i not in corroborated:
+            det = detections[i]
+            resolved[i] = Detection(text=det.text, quad=det.quad, conf=det.conf, angle_deg=cardinal)
+    return resolved
 
 
 def _canonicalise_vertical(det: Detection) -> Detection:
