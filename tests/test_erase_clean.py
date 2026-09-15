@@ -50,6 +50,34 @@ def test_erased_text_region_returns_to_true_paper_not_a_darker_bucket():
     assert region.mean() >= 253.0, f"erase left the region averaging {region.mean():.1f}, not ~255"
 
 
+def test_pattern_detection_is_not_diluted_by_an_earlier_boxs_fresh_fill():
+    """Regression: erase_text's own box loop calls _looks_patterned
+    against `work` — the SAME array it progressively flat-fills one box
+    at a time — so by the time a LATER box is checked, its 6px ring can
+    dip into an EARLIER box that was just filled a moment ago. Real
+    plans crowd runs only a few pixels apart (a room name beside its
+    own area figure), close enough for exactly this. Sampling the
+    neighbour's fresh fill instead of its true original texture dilutes
+    the measured variance below the pattern threshold, silently
+    suppressing this warning for the crowded-label case it exists to
+    catch. Checked against the ORIGINAL image now, not `work`.
+    """
+    img = np.full((100, 150, 3), 255, np.uint8)
+    box_a = (10.0, 10.0, 65.0, 60.0)  # erased FIRST
+    box_b = (68.0, 20.0, 78.0, 50.0)  # erased second; its own left ring
+    #                                   reaches back into box A's territory
+    # A patterned strip inside box A, near its right edge — within box
+    # B's own ring reach, but nowhere near box A's own ring (so erasing
+    # box A's own local-paper estimate isn't thrown off by it).
+    shades = [130, 255, 140, 250, 135, 245, 150, 255]
+    for i, y in enumerate(range(10, 60, 3)):
+        img[y : y + 2, 58:65] = shades[i % len(shades)]
+
+    result = erase_text(img, [box_a, box_b])
+    codes = [f.code for f in result.flags]
+    assert codes.count("erase-over-pattern") >= 1
+
+
 def test_pattern_detection_ignores_the_just_filled_interior():
     """Regression: _looks_patterned sampled box+ring together with no
     exclusion of the box interior. Called right after that interior was

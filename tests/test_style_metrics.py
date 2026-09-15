@@ -8,7 +8,13 @@ import cv2
 import numpy as np
 import pytest
 
-from spejl.style.metrics import fit_font_size, measure_ink_center, measure_ink_extent, resolve_font
+from spejl.style.metrics import (
+    _reads_vertically,
+    fit_font_size,
+    measure_ink_center,
+    measure_ink_extent,
+    resolve_font,
+)
 
 
 @pytest.fixture(scope="module")
@@ -24,6 +30,42 @@ def test_out_of_bounds_bbox_falls_back_to_its_own_real_size():
     image = np.full((50, 50, 3), 255, np.uint8)
     # Entirely outside the image, but a real 80x30 box.
     along, across = measure_ink_extent(image, (100.0, 100.0, 180.0, 130.0), 0.0)
+    assert along == pytest.approx(80.0)
+    assert across == pytest.approx(30.0)
+
+
+@pytest.mark.parametrize(
+    ("angle_deg", "expected_vertical"),
+    [
+        (0.0, False),
+        (10.0, False),
+        (170.0, False),   # near +180 -- a HORIZONTAL direction, same as 0
+        (-175.0, False),  # near -180 -- same physical direction as +180
+        (90.0, True),
+        (-90.0, True),
+        (95.0, True),
+        (-88.0, True),
+    ],
+)
+def test_reads_vertically_handles_the_180_wraparound(angle_deg: float, expected_vertical: bool):
+    """Regression: a plain abs(angle_deg) > 45 test mislabelled anything
+    near 180/-180 (a HORIZONTAL direction, same as 0) as vertical, since
+    raw magnitude has no notion that 180 and -180 are the same nearby
+    direction. Upside-down horizontal text (e.g. 170 deg) got its width
+    and height swapped everywhere this decision is used.
+    """
+    assert _reads_vertically(angle_deg) is expected_vertical
+
+
+def test_near_180_degree_text_is_measured_as_horizontal_not_swapped():
+    """End-to-end version of the wraparound fix, through
+    measure_ink_extent's own fallback path: an 80x30 box read at 170
+    deg (near +180, genuinely horizontal) must measure along=80,
+    across=30 -- the SAME as the 0-degree case -- not swapped to
+    along=30, across=80 as a vertical run would be.
+    """
+    image = np.full((50, 50, 3), 255, np.uint8)
+    along, across = measure_ink_extent(image, (100.0, 100.0, 180.0, 130.0), 170.0)
     assert along == pytest.approx(80.0)
     assert across == pytest.approx(30.0)
 
@@ -111,13 +153,113 @@ def test_a_wall_fused_with_the_runs_own_glyphs_is_left_unpruned():
     still_fused = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
     assert still_fused == unguarded, "3 components for a 4-char string must block pruning"
 
-    # Positive control: with a component count that DOES meet or exceed
-    # the character count, the same wide component is recognised as an
-    # outlier and pruned — proving the guard above is what's protecting
-    # the 4-character case, not that pruning never fires at all.
-    pruned = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
+    # Positive control: with an expected_glyphs value BOTH the outer
+    # gate (>= before pruning) and the inner one (>= after pruning — see
+    # _drop_foreign_strokes' own equivalent guard, added for the exact
+    # same reason: the outlier itself might be the one holding real
+    # glyph ink) can be satisfied by, the same wide component is
+    # recognised as an outlier and pruned — proving the guards above are
+    # what's protecting the 4-character case, not that pruning never
+    # fires at all. 2, not 3: pruning the wide component always leaves
+    # exactly the 2 real digits, so 3 would trip the inner guard too.
+    pruned = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=2)
     assert pruned != unguarded
     assert pruned[0] < unguarded[0]
+
+
+def test_a_genuinely_wide_glyph_is_not_pruned_if_that_would_undercount_the_text():
+    """Regression: _drop_foreign_strokes only ever checked that ENOUGH
+    components survived to reach this point (the call site's own outer
+    gate) — not that pruning its own outlier wouldn't drop the count
+    BELOW the character count. An outlier by along-span is not
+    necessarily a foreign stroke; it could be a genuinely wide real
+    glyph (mixing 'W'/'M' with narrower siblings, e.g. this project's
+    own 'Walk-in' lexicon entry). If dropping it would leave fewer
+    components than the text has characters, there is no way to tell
+    the two apart, so it must be kept — the same reasoning the outer
+    gate already applies, extended to the filter's own result.
+    """
+    image = np.full((40, 130, 3), 255, np.uint8)
+    cv2.rectangle(image, (0, 10), (80, 30), (0, 0, 0), -1)    # a wide component
+    cv2.rectangle(image, (90, 10), (100, 30), (0, 0, 0), -1)  # 3 normal-width siblings
+    cv2.rectangle(image, (105, 10), (115, 30), (0, 0, 0), -1)
+    cv2.rectangle(image, (120, 10), (130, 30), (0, 0, 0), -1)
+    bbox = (0.0, 0.0, 130.0, 40.0)
+
+    # 4 components total; dropping the wide one leaves 3 -- short of a
+    # 4-character text, so it must stay.
+    protected = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
+    assert protected[0] > 100.0  # the wide component's own ink is still included
+
+    # With only 3 characters, dropping it leaves exactly enough (3) --
+    # the safety net doesn't block it here, proving it's the count that
+    # matters, not that this filter never fires at all.
+    pruned = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
+    assert pruned[0] < protected[0]
+
+
+def test_a_sparse_outlier_is_not_dropped_if_that_would_undercount_the_text():
+    """Same safety net as above, for _drop_sparse_linework: a low-fill
+    outlier is not dropped when doing so would leave fewer surviving
+    components than the text has characters.
+    """
+    image = np.full((40, 130, 3), 255, np.uint8)
+    cv2.rectangle(image, (0, 5), (60, 35), (0, 0, 0), 4)       # hollow (sparse) component, fill ~0.37
+    cv2.rectangle(image, (70, 10), (80, 30), (0, 0, 0), -1)    # 3 solid siblings, fill 1.0
+    cv2.rectangle(image, (90, 10), (100, 30), (0, 0, 0), -1)
+    cv2.rectangle(image, (110, 10), (120, 30), (0, 0, 0), -1)
+    bbox = (0.0, 0.0, 130.0, 40.0)
+
+    protected = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
+    assert protected[0] > 100.0  # the sparse component's own ink is still included
+
+    pruned = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
+    assert pruned[0] < protected[0]
+
+
+def test_a_small_edge_toucher_is_clipped_not_dropped_if_dropping_would_undercount():
+    """Same safety net for _drop_edge_touching_intrusions: a small
+    edge-touching component that would normally be dropped outright is
+    instead CLIPPED (its own real ink kept, cross-axis excess trimmed)
+    when dropping it entirely would leave too few components — the same
+    "clip, don't discard" treatment this function already gives a LARGE
+    edge intrusion, extended to a small one the text can't spare.
+    """
+    image = np.full((40, 130, 3), 255, np.uint8)
+    cv2.rectangle(image, (0, 0), (5, 40), (0, 0, 0), -1)       # small, touches top AND bottom edge
+    cv2.rectangle(image, (25, 10), (35, 30), (0, 0, 0), -1)    # 3 ordinary interior siblings
+    cv2.rectangle(image, (45, 10), (55, 30), (0, 0, 0), -1)
+    cv2.rectangle(image, (65, 10), (75, 30), (0, 0, 0), -1)
+    bbox = (0.0, 0.0, 130.0, 40.0)
+
+    protected = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=4)
+    # The edge-toucher's own left edge (x=0) is still represented.
+    assert protected[0] > 70.0
+
+    dropped = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=3)
+    assert dropped[0] < protected[0]
+
+
+def test_a_small_real_glyph_fragment_joins_the_cluster_if_dropping_it_would_undercount():
+    """Same safety net for _main_glyph_cluster's own 8%-of-anchor-area
+    floor: a real but small letter fragment (an 'i' or 'j' dot, in
+    spirit — disconnected from the rest of the glyph, small relative to
+    a much larger anchor in the same run) that falls under the floor is
+    still admitted as a growth candidate when the text doesn't have
+    enough other components to spare it. It still has to earn its way
+    into the cluster by proximity (the region-growing pass below) —
+    this only stops it being excluded from consideration outright.
+    """
+    image = np.full((40, 110, 3), 255, np.uint8)
+    cv2.rectangle(image, (10, 10), (90, 30), (0, 0, 0), -1)   # a large anchor glyph
+    cv2.rectangle(image, (95, 10), (100, 15), (0, 0, 0), -1)  # a tiny fragment, close by
+
+    bbox = (0.0, 0.0, 110.0, 40.0)
+    unprotected = measure_ink_extent(image, bbox, angle_deg=0.0)  # expected_glyphs=0: floor always applies
+    protected = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=2)
+
+    assert unprotected[0] < 85.0  # only the anchor's own extent
+    assert protected[0] > 85.0    # the small fragment is now included too
 
 
 def test_real_glyphs_outnumbered_by_small_marks_are_not_wrongly_pruned():
@@ -193,6 +335,35 @@ def test_a_wall_touching_the_crops_edge_is_dropped_even_when_neither_other_filte
 
     assert unguarded[1] == pytest.approx(40.0)  # wall sets across to the full crop height
     assert guarded[1] == pytest.approx(24.0, abs=2.0)  # letters' own true height, wall excluded
+
+
+def test_a_mid_span_sparse_component_is_excluded_even_below_the_span_box_cutoff():
+    """Regression: the initial per-component filter only excluded a
+    sparse (low fill-ratio) component when it ALSO spanned at least 80%
+    of the crop on some axis (the same span_box test the elongation
+    check uses) — a rule/dimension line spanning a more modest majority
+    (short of that 80% cutoff) escaped entirely, regardless of how
+    sparse it was. Sparse alone, with no span requirement, is already
+    established elsewhere in this file as a safe, unconditional signal
+    (a genuine glyph never measures below ~0.3 fill even fused);
+    span_box only still gates the classically-thin `elongated` case,
+    where a narrow REAL glyph ('1', 'l') could otherwise be caught.
+    """
+    image = np.full((40, 100, 3), 255, np.uint8)
+    # A hollow rectangle -- low fill ratio -- spanning 60% of the crop's
+    # width and 75% of its height, both short of the 80% spans_box cutoff.
+    cv2.rectangle(image, (5, 5), (65, 35), (0, 0, 0), 1)
+    # Two real, solidly-filled glyphs, comfortably inset from every edge.
+    cv2.rectangle(image, (75, 12), (85, 28), (0, 0, 0), -1)
+    cv2.rectangle(image, (90, 12), (98, 28), (0, 0, 0), -1)
+
+    bbox = (0.0, 0.0, 100.0, 40.0)
+    along, _across = measure_ink_extent(image, bbox, angle_deg=0.0, expected_glyphs=2)
+
+    # The true glyphs span x=75..98 (23px). If the sparse rectangle had
+    # survived, it would dominate the measured extent (spanning x=5..98,
+    # 93px), since it is by far the largest component.
+    assert along < 30.0
 
 
 def test_measure_ink_center_ignores_asymmetric_contamination():

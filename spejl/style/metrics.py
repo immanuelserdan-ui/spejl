@@ -37,6 +37,19 @@ _BOLD_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 )
 
+# ITU-R BT.601 luma weights, BGR order. The one formula every
+# ink/paper or darkest-colour sampler in this project needs against a
+# flat array of pixels — shared here (see bgr_luma) rather than
+# hand-rolled per call site, which had drifted into two independent
+# copies (this module's own ink/paper sampler, erase/clean.py's
+# _darkest_colour) before this fix.
+_BGR_LUMA_WEIGHTS = np.array([0.114, 0.587, 0.299], dtype=np.float32)
+
+
+def bgr_luma(flat_pixels: np.ndarray) -> np.ndarray:
+    """Perceptual luma of a flat ``(N, 3)`` array of BGR pixels."""
+    return flat_pixels.astype(np.float32) @ _BGR_LUMA_WEIGHTS
+
 
 @dataclass(frozen=True)
 class TextStyle:
@@ -119,7 +132,7 @@ def _sample_ink_and_paper(
     if crop.ndim == 2:
         crop = np.dstack([crop] * 3)
     flat = crop.reshape(-1, 3).astype(np.float32)
-    luma = flat @ np.array([0.114, 0.587, 0.299], dtype=np.float32)  # BGR weights
+    luma = bgr_luma(flat)
 
     dark_cut = np.percentile(luma, 10)
     light_cut = np.percentile(luma, 90)
@@ -175,7 +188,7 @@ def measure_ink_extent(
     line the check above already catches, but just as much not a glyph.
     """
     raw_x0, raw_y0, raw_x1, raw_y1 = (int(round(v)) for v in bbox)
-    vertical = abs(angle_deg) > 45
+    vertical = _reads_vertically(angle_deg)
 
     def _fallback() -> tuple[float, float]:
         # Use the ORIGINAL (unclamped) box, not the clamped one — a box
@@ -284,6 +297,34 @@ def _needs_rotated_measurement(angle_deg: float) -> bool:
     )
 
 
+# Which cardinal (from the same five-cardinal set _needs_rotated_
+# measurement already uses) a run's own reading direction is closest to
+# determines whether it reads along the box's width or its height.
+_CARDINAL_IS_VERTICAL = {0.0: False, 90.0: True, -90.0: True, 180.0: False, -180.0: False}
+
+
+def _reads_vertically(angle_deg: float) -> bool:
+    """True if ``angle_deg`` reads along the box's height, not its width.
+
+    A plain ``abs(angle_deg) > 45`` test — used here until this fix —
+    mislabels anything near 180 deg/-180 deg (a HORIZONTAL direction,
+    same as 0 deg) as vertical: raw magnitude has no notion that 180
+    and -180 are the same nearby direction, so upside-down horizontal
+    text (e.g. 170 deg — well outside +-45 deg of 0, but genuinely
+    horizontal) got its width and height swapped everywhere this
+    decision is used, handing the font-size solver the box's WIDTH as
+    its target cap height. Resolved the same way detect/rotations.py's
+    own wraparound fix resolves it: find the nearest of the same five
+    cardinals _needs_rotated_measurement already treats as equivalent,
+    with a proper wrapped distance, not raw subtraction.
+    """
+    nearest = min(
+        _CARDINAL_IS_VERTICAL,
+        key=lambda c: abs(((angle_deg - c + 180.0) % 360.0) - 180.0),
+    )
+    return _CARDINAL_IS_VERTICAL[nearest]
+
+
 def _straighten_crop(
     image: np.ndarray, bbox: tuple[float, float, float, float], angle_deg: float
 ) -> tuple[np.ndarray, float, float, np.ndarray] | None:
@@ -315,13 +356,20 @@ def _straighten_crop(
         return None
     cx, cy = (x0 + x1) / 2.0, (y0 + y1) / 2.0
     bw, bh = x1 - x0, y1 - y0
+    ih, iw = image.shape[:2]
     # Half the box's own diagonal, plus a fixed margin: generous enough
     # that rotating a bw x bh box about its own centre never clips a
-    # corner, at any angle.
-    half = math.hypot(bw, bh) / 2.0 + 12.0
+    # corner, at any angle. Capped against the SOURCE image's own
+    # diagonal: a real detected run is always small relative to the
+    # sheet it's on (a dimension number is tens of pixels on a
+    # thousand-plus-pixel sheet), so this cap never engages for any
+    # legitimate bbox — it exists only for a malformed or wrongly-merged
+    # box (two labels fused into one detection, say), which would
+    # otherwise allocate a canvas whose area scales with the diagonal
+    # SQUARED, with no upper bound, for a single run.
+    half = min(math.hypot(bw, bh) / 2.0 + 12.0, math.hypot(iw, ih))
     side = max(1, int(round(2 * half)))
 
-    ih, iw = image.shape[:2]
     origin_x, origin_y = cx - half, cy - half
     sx0, sy0 = int(round(origin_x)), int(round(origin_y))
     cx0, cy0 = max(0, sx0), max(0, sy0)
@@ -511,7 +559,7 @@ def _measure_ink_cluster_bbox(
     h, w = image.shape[:2]
     x0, y0 = max(0, raw_x0), max(0, raw_y0)
     x1, y1 = min(w, raw_x1), min(h, raw_y1)
-    vertical = abs(angle_deg) > 45
+    vertical = _reads_vertically(angle_deg)
 
     if x1 <= x0 or y1 <= y0:
         return None
@@ -535,7 +583,21 @@ def _measure_ink_cluster_bbox(
         spans_box = cwid > cw * 0.8 or chgt > ch * 0.8
         elongated = cwid > chgt * 8 or chgt > cwid * 8
         sparse = (area / max(1, cwid * chgt)) < 0.2
-        if spans_box and (elongated or sparse):
+        # `sparse` alone, with no span requirement, is enough on its own:
+        # this file's own confirmed real data (see this function's
+        # docstring, and _drop_sparse_linework's) is that a genuine glyph
+        # never measures below ~0.3 fill even in a fused, contaminated
+        # case — 0.2 already sits with margin below every real letter
+        # this project's fixes are built on, so requiring it to ALSO span
+        # most of the crop (spans_box) before trusting it only reopens a
+        # gap the span-gated version already fixed one instance of: a
+        # rule/dimension line spanning a more modest majority of the crop
+        # (short of the 80% spans_box cutoff, not just short of the
+        # elongation ratio) is still definitively not a glyph by the fill
+        # signal alone. `elongated` keeps its own spans_box requirement —
+        # unlike sparse, a thin shape with no span requirement at all
+        # could legitimately be a narrow real glyph ('1', 'l').
+        if sparse or (spans_box and elongated):
             continue  # a rule or dimension line, not a glyph
         boxes.append((cx, cy, cx + cwid, cy + chgt, int(area)))
 
@@ -552,13 +614,13 @@ def _measure_ink_cluster_bbox(
     # leaving the measurement inflated, which is at least visible and
     # recoverable via the render-time shrink-to-fit guard.
     if expected_glyphs and len(boxes) >= expected_glyphs:
-        boxes = _drop_foreign_strokes(boxes, vertical)
-        boxes = _drop_sparse_linework(boxes)
-        boxes = _drop_edge_touching_intrusions(boxes, ch, cw, vertical)
+        boxes = _drop_foreign_strokes(boxes, vertical, expected_glyphs)
+        boxes = _drop_sparse_linework(boxes, expected_glyphs)
+        boxes = _drop_edge_touching_intrusions(boxes, ch, cw, vertical, expected_glyphs)
         if not boxes:
             return None
 
-    boxes = _main_glyph_cluster(boxes, ch, cw, vertical)
+    boxes = _main_glyph_cluster(boxes, ch, cw, vertical, expected_glyphs)
 
     gx0 = min(b[0] for b in boxes)
     gy0 = min(b[1] for b in boxes)
@@ -615,7 +677,7 @@ def _core_candidates(
 
 
 def _drop_foreign_strokes(
-    boxes: list[tuple[int, int, int, int, int]], vertical: bool
+    boxes: list[tuple[int, int, int, int, int]], vertical: bool, expected_glyphs: int = 0
 ) -> list[tuple[int, int, int, int, int]]:
     """Drop a component whose extent ALONG the reading direction dwarfs
     its siblings' — the signature of a foreign stroke (a wall or
@@ -675,11 +737,21 @@ def _drop_foreign_strokes(
     if median <= 0:
         return boxes
     kept = [b for b in boxes if along_span(b) <= median * 2.5]
+    if expected_glyphs and len(kept) < expected_glyphs:
+        # Dropping would leave fewer components than the text has
+        # characters — the same "a real glyph might be the one being
+        # discarded, with no way to recover it" reasoning the call
+        # site's own outer gate already applies before calling this
+        # function at all, extended to the case where the OUTLIER
+        # itself turns out to be real (a genuinely wide glyph mixed
+        # with narrower siblings, not a foreign stroke).
+        return boxes
     return kept or boxes  # never discard every candidate outright
 
 
 def _drop_sparse_linework(
     boxes: list[tuple[int, int, int, int, int]],
+    expected_glyphs: int = 0,
 ) -> list[tuple[int, int, int, int, int]]:
     """Drop a component whose FILL RATIO — actual ink pixels divided by
     its own bounding-box area — is far sparser than its siblings'.
@@ -736,11 +808,17 @@ def _drop_sparse_linework(
     if median <= 0:
         return boxes
     kept = [b for b in boxes if fill_ratio(b) >= median * 0.4]
+    if expected_glyphs and len(kept) < expected_glyphs:
+        return boxes  # see _drop_foreign_strokes's own equivalent guard
     return kept or boxes  # never discard every candidate outright
 
 
 def _drop_edge_touching_intrusions(
-    boxes: list[tuple[int, int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
+    boxes: list[tuple[int, int, int, int, int]],
+    crop_height: int,
+    crop_width: int,
+    vertical: bool,
+    expected_glyphs: int = 0,
 ) -> list[tuple[int, int, int, int, int]]:
     """Drop — or, when it's too big to safely discard, CLIP — a
     component that touches the crop boundary on the CROSS-baseline
@@ -800,21 +878,37 @@ def _drop_edge_touching_intrusions(
     areas = sorted(b[4] for b in interior)
     median_area = areas[len(areas) // 2]
 
+    def _clipped(b: tuple[int, int, int, int, int]) -> tuple[int, int, int, int, int]:
+        if vertical:
+            return (max(b[0], interior_lo), b[1], min(b[2], interior_hi), b[3], b[4])
+        return (b[0], max(b[1], interior_lo), b[2], min(b[3], interior_hi), b[4])
+
     kept = list(interior)
+    small_edge_touchers: list[tuple[int, int, int, int, int]] = []
     for b in boxes:
         if not touches_cross_edge(b):
             continue
         if median_area > 0 and b[4] > median_area * 1.5:
-            if vertical:
-                kept.append((max(b[0], interior_lo), b[1], min(b[2], interior_hi), b[3], b[4]))
-            else:
-                kept.append((b[0], max(b[1], interior_lo), b[2], min(b[3], interior_hi), b[4]))
-        # else: small enough to be pure linework or stray noise -- drop it.
+            kept.append(_clipped(b))
+        else:
+            small_edge_touchers.append(b)  # pure linework or noise, presumed droppable
+
+    if expected_glyphs and len(kept) < expected_glyphs:
+        # Not enough survived without them — rather than lose a real,
+        # small glyph fused with edge-touching linework entirely (with
+        # no way to recover it), clip it the same way a large intrusion
+        # is already clipped above, instead of discarding it outright.
+        kept.extend(_clipped(b) for b in small_edge_touchers)
+
     return kept or boxes  # never discard every candidate outright
 
 
 def _main_glyph_cluster(
-    boxes: list[tuple[int, int, int, int, int]], crop_height: int, crop_width: int, vertical: bool
+    boxes: list[tuple[int, int, int, int, int]],
+    crop_height: int,
+    crop_width: int,
+    vertical: bool,
+    expected_glyphs: int = 0,
 ) -> list[tuple[int, int, int, int, int]]:
     """Keep only the components that form one word's own glyphs, and
     drop anything sitting in a detection box that isn't actually part
@@ -863,6 +957,17 @@ def _main_glyph_cluster(
 
     cluster = [ordered.pop(0)]
     remaining = [b for b in ordered if area(b) >= min_area]
+    if expected_glyphs and len(remaining) + 1 < expected_glyphs:
+        # The 8% floor left fewer CANDIDATES than the text has
+        # characters — the same risk _core_candidates' own docstring
+        # already documents for the sibling filters above (a real but
+        # small letter part, like an 'i' dot, could fall under a fixed
+        # fraction of a much larger anchor in the same run): admit every
+        # component as a growth candidate rather than let a real one be
+        # permanently excluded from ever joining the cluster. This can
+        # only ADD candidates the region-growing pass below still has to
+        # earn its way in by proximity — never force one to join.
+        remaining = list(ordered)
     band0, band1 = cross_span(cluster[0])
 
     changed = True

@@ -98,6 +98,28 @@ def test_straighten_and_unstraighten_round_trips_a_point(angle_deg: float):
     assert mapped_y == pytest.approx(cy, abs=1.0)
 
 
+def test_a_wildly_oversized_bbox_does_not_blow_up_the_straightened_canvas():
+    """Regression: half the box's own diagonal had no upper bound before
+    being doubled into a canvas side length and fed to cv2.warpAffine —
+    a malformed or wrongly-merged detection box (two labels fused into
+    one, say) could allocate a canvas whose area scales with the
+    diagonal SQUARED, hundreds of MB for a single run, with no sanity
+    check. Capped against the SOURCE image's own diagonal: no
+    legitimate run (always small relative to the sheet it's on) is ever
+    affected, but a pathological box is bounded to a sane multiple of
+    the actual image size instead of scaling without limit.
+    """
+    image = np.full((300, 300, 3), 255, np.uint8)
+    bbox = (-50_000.0, -50_000.0, 50_000.0, 50_000.0)  # a malformed, absurd box
+    result = _straighten_crop(image, bbox, 45.0)
+    assert result is not None
+    crop, _origin_x, _origin_y, _matrix = result
+    # Nowhere near the ~141,000px an uncapped box's own diagonal would
+    # otherwise demand — bounded to a sane multiple of the image's own
+    # diagonal (~424px) instead.
+    assert crop.shape[0] < 2000
+
+
 def test_a_diagonal_run_measures_black_ink_not_white_on_white(font_path: str):
     """Regression: on a real plan, a dimension number tilted ~47°
     measured its own ink colour as (255, 255, 255) -- identical to

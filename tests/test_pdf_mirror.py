@@ -13,7 +13,7 @@ import pymupdf
 import pytest
 
 from spejl.models import Axis
-from spejl.vector.pdf_mirror import mirror_pdf
+from spejl.vector.pdf_mirror import _rotate_param, mirror_pdf
 
 PAGE_W, PAGE_H = 400.0, 300.0
 ROOM = pymupdf.Rect(40, 40, 240, 260)  # room occupies the LEFT side of the sheet
@@ -173,6 +173,36 @@ def test_sidecar_reports_one_page_and_three_text_runs(source_pdf: Path, tmp_path
     assert doc.pages[0].flags == []  # no embedded images to flag
 
 
+def test_genuinely_diagonal_text_is_flagged_not_silently_rounded(tmp_path: Path):
+    """Regression: the module docstring used to claim diagonal text
+    "never fires against real input" — Route B's own fix history this
+    session confirmed otherwise (real dimension numbers following a
+    sloped wall, on this project's own real plans). Page.insert_text
+    still only rotates in quarter turns (the morph rotation path this
+    fix would need isn't implemented), but a span whose own true
+    direction gets rounded by more than a trivial float sliver must now
+    show up in the sidecar, not vanish silently.
+    """
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    # A genuinely diagonal run (30 degrees off horizontal) -- pymupdf's
+    # own `morph` parameter is the only way to insert text at an
+    # arbitrary angle for this test fixture; production code doesn't
+    # use it (that's the whole limitation this test is confirming).
+    pivot = pymupdf.Point(150, 150)
+    mat = pymupdf.Matrix(1, 0, 0, 1, 0, 0).prerotate(30)
+    page.insert_text((150, 150), "4381", fontsize=14, fontname="helv", morph=(pivot, mat), color=(0, 0, 0))
+    src = tmp_path / "diagonal.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    out = tmp_path / "diagonal_mirrored.pdf"
+    result = mirror_pdf(src, out, axis=Axis.VERTICAL)
+
+    flag_codes = {f.code for f in result.pages[0].flags}
+    assert "diagonal-text-rounded" in flag_codes
+
+
 def test_hairline_stroke_survives_as_thin_not_thickened_to_1pt(tmp_path: Path):
     """Regression: a genuine PDF '0 w' hairline (DWG->PDF exporters use
     this for wall/gridlines) was read correctly as width 0.0 by
@@ -231,3 +261,21 @@ def test_double_mirror_is_close_to_idempotent(source_pdf: Path, tmp_path: Path):
     src_cx = (src_stue["bbox"][0] + src_stue["bbox"][2]) / 2
     rt_cx = (rt_stue["bbox"][0] + rt_stue["bbox"][2]) / 2
     assert rt_cx == pytest.approx(src_cx, abs=2.0)
+
+
+@pytest.mark.parametrize(
+    ("angle_deg", "expected_rotate", "expected_deviation"),
+    [
+        (0.0, 0, 0.0),
+        (90.0, 90, 0.0),
+        (180.0, 180, 0.0),
+        (-90.0, 270, 0.0),
+        (30.0, 0, 30.0),     # a real diagonal -- rounds to 0, real cost
+        (96.9, 90, 6.9),     # this project's own confirmed real tilt
+    ],
+)
+def test_rotate_param_reports_the_true_rounding_cost(angle_deg, expected_rotate, expected_deviation):
+    dx, dy = math.cos(math.radians(angle_deg)), -math.sin(math.radians(angle_deg))
+    rotate, deviation = _rotate_param(dx, dy)
+    assert rotate == expected_rotate
+    assert deviation == pytest.approx(expected_deviation, abs=0.1)

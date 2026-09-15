@@ -18,6 +18,7 @@ import cv2
 import numpy as np
 
 from spejl.models import Flag
+from spejl.style.metrics import bgr_luma
 
 
 @dataclass(frozen=True)
@@ -219,7 +220,18 @@ def erase_text(
         region = work[box[1]:box[3], box[0]:box[2]]
         region[sub_mask > 0] = colour
 
-        if _looks_patterned(work, box):
+        # Checked against the ORIGINAL `image`, not the progressively-
+        # mutated `work`: this loop fills one box per iteration, so by
+        # the time a LATER box is checked, `work` already carries every
+        # EARLIER box's fresh flat fill — and real plans crowd runs only
+        # a few pixels apart (a room name beside its own area figure),
+        # close enough that one box's 6px ring can dip into a
+        # neighbour's box that was just filled a moment ago. Sampling
+        # that fill instead of the neighbour's true original texture
+        # dilutes the measured variance below the pattern threshold,
+        # silently suppressing this warning for exactly the crowded-
+        # label case it exists to catch.
+        if _looks_patterned(image, box):
             flags.append(
                 Flag(
                     code="erase-over-pattern",
@@ -339,7 +351,7 @@ def _darkest_colour(image: np.ndarray) -> np.ndarray:
     """The sheet's ink colour, taken globally — linework on a plan is one
     colour, and sampling globally avoids inheriting a local artefact."""
     flat = image.reshape(-1, 3).astype(np.float32)
-    luma = flat @ np.array([0.114, 0.587, 0.299], dtype=np.float32)
+    luma = bgr_luma(flat)
     dark = flat[luma <= np.percentile(luma, 1)]
     if dark.size == 0:
         return np.array([0, 0, 0], dtype=np.uint8)

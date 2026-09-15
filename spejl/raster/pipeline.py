@@ -65,6 +65,27 @@ class RasterResult:
 
 def _upscale_factor(detections: list[Detection]) -> float:
     """Decide whether the sheet needs enlarging before OCR is trusted."""
+    # Graphical symbols and wrong-script hallucinations (see
+    # _looks_like_a_graphical_symbol/_looks_like_the_wrong_script below)
+    # are excluded before the median is taken: this runs BEFORE the S3
+    # loop that would otherwise filter them out of `runs`, and every
+    # confirmed real case (a spot-elevation marker, an I-beam/lintel
+    # cross-section, two valve/knob icons) measured noticeably SMALLER
+    # than genuine dimension or room-label text — left in, enough of
+    # them on an icon-dense sheet could drag the median down enough to
+    # trigger an unneeded upscale, or even the REFUSE_CAP_HEIGHT_PX
+    # refusal, for a sheet whose actual TEXT is perfectly legible.
+    # (Deliberately not the full snap()-based short-unmatched-symbol
+    # check too: that needs the lexicon and runs again per-detection in
+    # the S3 loop regardless — duplicating it here for this coarse,
+    # sheet-wide size estimate isn't worth the extra cost.)
+    text_like = [
+        det
+        for det in detections
+        if not _looks_like_a_graphical_symbol(det.text)
+        and not _looks_like_the_wrong_script(det.text)
+    ]
+    detections = text_like or detections  # never let filtering empty the estimate entirely
     if not detections:
         return 1.0
     caps = []
@@ -434,6 +455,28 @@ def _snap_consistent_sizes(runs: list[MirroredRun]) -> None:
     snapped size rather than just overwritten alongside it, so a run
     nudged to its cluster's size still hits its own measured target
     width, not a stale one computed for its original size.
+
+    Each candidate is compared against the PREVIOUS one added
+    (``cluster[-1]``), not the cluster's first/smallest member —
+    deliberately: anchoring to the first member was tried and reverted,
+    confirmed WRONG against this project's own golden fixture, not just
+    theoretically reconsidered. A long chain of individually-under-
+    tolerance steps CAN drift a cluster's own min and max past the
+    tolerance measured end-to-end — but on the real fixture
+    ``_snap_consistent_sizes`` was built for, 11 same-kind dimension
+    runs that are ALL the same size on the original drawing measure
+    independently across a real, confirmed 25-30px spread (noise that
+    happens to distribute smoothly across the range, not in tight,
+    separated clumps) — anchoring to the first member refused to bridge
+    that real 20% total spread in one step, left it as two sizes
+    instead of one, and measurably broke this project's own round-trip
+    fidelity test on the actual golden fixture (char_accuracy fell from
+    a clean pass to 0.973, below its own 0.99 floor). Pairwise chaining
+    against the immediately preceding member is what correctly re-
+    collapses that real, continuously-distributed noise back to one
+    size — the reason not to "fix" this into a smaller
+    theoretical gap without new real evidence for that specific shape
+    of failure, since this project's own real data contradicts it.
     """
     by_kind: dict[str, list[MirroredRun]] = {}
     for run in runs:

@@ -29,36 +29,46 @@ def _main() -> None:
 
 @app.command()
 def mirror(
-    input_path: Path = typer.Argument(..., exists=True, help="Source plan: vector PDF today."),
+    input_path: Path = typer.Argument(
+        ..., exists=True, dir_okay=False, help="Source plan: vector PDF today."
+    ),
     output: Path = typer.Option(None, "-o", "--output", help="Output path. Defaults to <name>_mirrored<ext>."),
     axis: Axis = typer.Option(Axis.VERTICAL, "--axis", help="v = left/right, h = top/bottom, both = 180°."),
 ) -> None:
     """Mirror a floor plan without mirroring its text."""
     try:
         route = sniff_route(input_path)
-    except ValueError as exc:  # unrecognised format — an existing file we
-        # still can't route (bad extension, magic bytes match nothing)
+
+        if output is None:
+            output = input_path.with_name(f"{input_path.stem}_mirrored{input_path.suffix}")
+
+        if route is Route.VECTOR:
+            from spejl.vector.pdf_mirror import mirror_pdf
+
+            doc = mirror_pdf(input_path, output, axis=axis)
+        else:
+            from spejl.raster.pipeline import mirror_raster
+
+            doc = mirror_raster(input_path, output, axis=axis).document
+
+        sidecar = output.with_suffix(output.suffix + ".spejl.json")
+        sidecar.write_text(json.dumps(doc.to_sidecar(), indent=2), encoding="utf-8")
+    except (ValueError, OSError, RuntimeError) as exc:
+        # Every realistic failure this command can hit on real input, in
+        # one place rather than two narrower try/excepts that left gaps
+        # between them: an unrecognised format or a sheet too
+        # low-resolution to mirror honestly (both ValueError, the two
+        # cases this used to catch); a corrupt or mis-named PDF pymupdf
+        # itself refuses to open (pymupdf.FileDataError, a RuntimeError
+        # subclass — sniff_route trusts a recognised suffix over
+        # content, so a raster file saved with a .pdf extension reaches
+        # this, not a route-sniffing ValueError); a permission or
+        # missing-directory error writing the output file or its
+        # sidecar (OSError). All surface as the same clean, red one-line
+        # message this command already gave a bad input format, instead
+        # of a raw Python traceback.
         typer.secho(str(exc), fg=typer.colors.RED)
         raise typer.Exit(code=1) from exc
-
-    if output is None:
-        output = input_path.with_name(f"{input_path.stem}_mirrored{input_path.suffix}")
-
-    if route is Route.VECTOR:
-        from spejl.vector.pdf_mirror import mirror_pdf
-
-        doc = mirror_pdf(input_path, output, axis=axis)
-    else:
-        from spejl.raster.pipeline import mirror_raster
-
-        try:
-            doc = mirror_raster(input_path, output, axis=axis).document
-        except ValueError as exc:  # resolution too low to mirror honestly
-            typer.secho(str(exc), fg=typer.colors.RED)
-            raise typer.Exit(code=1) from exc
-
-    sidecar = output.with_suffix(output.suffix + ".spejl.json")
-    sidecar.write_text(json.dumps(doc.to_sidecar(), indent=2), encoding="utf-8")
 
     total_runs = sum(p.text_runs_mirrored for p in doc.pages)
     total_flags = sum(len(p.flags) for p in doc.pages)

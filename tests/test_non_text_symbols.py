@@ -19,6 +19,7 @@ from spejl.raster.pipeline import (
     _looks_like_a_graphical_symbol,
     _looks_like_a_short_unmatched_symbol,
     _looks_like_the_wrong_script,
+    _upscale_factor,
     mirror_raster,
 )
 
@@ -191,3 +192,28 @@ def test_a_short_unmatched_alnum_read_is_not_rendered_as_garbled_text(tmp_path):
 
     flag_codes = {f.code for p in result.document.pages for f in p.flags}
     assert "non-text-symbol" in flag_codes
+
+
+def _det(text: str, cap_height: float, conf: float = 0.9) -> Detection:
+    return Detection(text=text, quad=((0.0, 0.0), (10.0, 0.0), (10.0, cap_height), (0.0, cap_height)), conf=conf)
+
+
+def test_upscale_factor_ignores_graphical_symbols_in_its_median():
+    """Regression: _upscale_factor computed its median cap-height from
+    the RAW, unfiltered detection list — before the S3 loop's own
+    graphical-symbol filtering ever runs. Every confirmed real symbol
+    misread measures noticeably smaller than genuine text (see the
+    'O'/'H'/'GO' cases above); left in, enough of them on an icon-dense
+    sheet could drag the median down enough to trigger an unneeded
+    upscale — or even the REFUSE_CAP_HEIGHT_PX refusal — for a sheet
+    whose actual TEXT is perfectly legible.
+    """
+    real_text = [_det("Bad", 30.0), _det("Stue", 32.0), _det("4090", 28.0)]
+    # Small graphical-symbol misreads (no alnum characters at all —
+    # _looks_like_a_graphical_symbol's own signature), outnumbering the
+    # real text: enough, unfiltered, to drag the raw median below
+    # MIN_CAP_HEIGHT_PX and change the upscale decision.
+    symbols = [_det("→", 6.0) for _ in range(6)]
+
+    assert _upscale_factor(real_text) == 1.0  # real text alone: no upscale needed
+    assert _upscale_factor(real_text + symbols) == 1.0  # symbols must not change that

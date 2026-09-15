@@ -29,11 +29,18 @@ swallowed:
       "unmirrored", so nobody mistakes a dropped image for a mirrored
       one on a plan that happens to have one;
     * diagonal text is rounded to the nearest 90° on re-insertion,
-      because ``Page.insert_text`` only rotates in quarter turns. Every
-      dimension label and room name in the target plans is horizontal
-      or vertical, so this never fires against real input — but a plan
-      with angled callouts would need the ``morph`` rotation path
-      before it could claim losslessness for those runs.
+      because ``Page.insert_text`` only rotates in quarter turns.
+      Genuinely diagonal dimension text turned out NOT to be a
+      hypothetical: Route B's own fix history this session confirmed
+      real, recurring dimension numbers following a sloped partition
+      wall at a real, deliberate angle (not a cardinal) on this
+      project's own real plans. A plan with a diagonal run that reaches
+      this route the same way needs the ``morph`` rotation path before
+      it could claim losslessness for those runs — not yet implemented,
+      so every span whose own true direction is rounded by more than a
+      trivial floating-point sliver is flagged (``diagonal-text-
+      rounded``) rather than silently mis-rotated with nothing in the
+      sidecar to show for it.
 """
 
 from __future__ import annotations
@@ -91,8 +98,10 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
             shape.commit()
 
             flags: list[Flag] = []
+            diagonal_text_rounded = False
             for span in spans:
-                _reinsert_mirrored_span(new_page, span, W, H, axis)
+                if _reinsert_mirrored_span(new_page, span, W, H, axis):
+                    diagonal_text_rounded = True
 
             if page.get_images():
                 flags.append(
@@ -100,6 +109,16 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
                         code="image-removed",
                         message="Page contains embedded raster image(s); these "
                         "are REMOVED, not mirrored — see module docstring.",
+                        severity="warn",
+                    )
+                )
+            if diagonal_text_rounded:
+                flags.append(
+                    Flag(
+                        code="diagonal-text-rounded",
+                        message="Page contains text at a genuine diagonal angle; "
+                        "Page.insert_text only rotates in quarter turns, so it "
+                        "was rounded to the nearest 90° — see module docstring.",
                         severity="warn",
                     )
                 )
@@ -161,7 +180,17 @@ def _int_to_rgb(color_int: int) -> tuple[float, float, float]:
     return (r / 255, g / 255, b / 255)
 
 
-def _rotate_param(dx: float, dy: float) -> int:
+# Vector PDF text direction is exact glyph-run geometry lifted straight
+# from the page, not noisy OCR measurement — unlike the raster route's
+# ordinary-detection-noise snap floor (_ALWAYS_SNAP_DEG = 3.0 in
+# detect/rotations.py), a deviation here of even a couple of degrees is
+# a genuine, deliberately-drawn diagonal, not measurement noise. This
+# tiny tolerance exists only to absorb floating-point rounding in the
+# PDF's own stored direction vector, not to forgive a real tilt.
+_DIAGONAL_ROUNDING_TOLERANCE_DEG = 0.5
+
+
+def _rotate_param(dx: float, dy: float) -> tuple[int, float]:
     """Map a canonicalised direction to PyMuPDF's ``insert_text(rotate=)``
     quarter-turn steps.
 
@@ -170,8 +199,15 @@ def _rotate_param(dx: float, dy: float) -> int:
     empirically during the build: ``rotate=90`` produces direction
     (0, -1). Quarter turns only, hence the rounding; the module docstring
     covers what that costs for diagonal text.
+
+    Also returns the signed deviation (degrees) between the run's own
+    true angle and the cardinal it was rounded to, so the caller can
+    judge whether that rounding actually cost anything worth flagging —
+    see ``_DIAGONAL_ROUNDING_TOLERANCE_DEG``.
     """
-    return int(round(M.angle_from_direction(dx, dy) / 90) * 90) % 360
+    angle = M.angle_from_direction(dx, dy)
+    nearest_quarter_turn = round(angle / 90)
+    return int(nearest_quarter_turn * 90) % 360, angle - nearest_quarter_turn * 90
 
 
 def _font_alias(font_name: str, bold: bool, italic: bool) -> str:
@@ -187,14 +223,21 @@ def _font_alias(font_name: str, bold: bool, italic: bool) -> str:
 
 def _reinsert_mirrored_span(
     page: pymupdf.Page, span: dict, W: float, H: float, axis: Axis
-) -> None:
+) -> bool:
+    """Re-insert ``span`` upright at its mirrored anchor.
+
+    Returns True if this span's own true reading direction was a
+    meaningfully diagonal one (see ``_DIAGONAL_ROUNDING_TOLERANCE_DEG``),
+    rounded to the nearest quarter turn on insertion — the caller flags
+    this so it's visible in the sidecar, not silently swallowed.
+    """
     x0, y0, x1, y1 = span["bbox"]
     mx0, my0 = _mirror_point(x0, y0, W, H, axis)
     mx1, my1 = _mirror_point(x1, y1, W, H, axis)
     cx, cy = (mx0 + mx1) / 2, (my0 + my1) / 2  # mirrored box centre — the anchor
 
     dxf, dyf = M.mirror_direction(span["dir"][0], span["dir"][1], axis)
-    rotate = _rotate_param(dxf, dyf)
+    rotate, deviation_deg = _rotate_param(dxf, dyf)
 
     fontname = _font_alias(span["font"], span["bold"], span["italic"])
     fontsize = span["size"]
@@ -225,6 +268,7 @@ def _reinsert_mirrored_span(
         color=span["color"],
         rotate=rotate,
     )
+    return abs(deviation_deg) >= _DIAGONAL_ROUNDING_TOLERANCE_DEG
 
 
 # --------------------------------------------------------------------------
