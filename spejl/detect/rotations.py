@@ -106,9 +106,21 @@ def _orientation_is_plausible(det: Detection) -> bool:
 
 
 def detect_all_orientations(
-    image: np.ndarray, backend: OcrBackend, iou_threshold: float = 0.3
+    image: np.ndarray,
+    backend: OcrBackend,
+    iou_threshold: float = 0.3,
+    dropped_out: list[Detection] | None = None,
 ) -> list[Detection]:
-    """Run every rotation pass and merge into one set of source-space runs."""
+    """Run every rotation pass and merge into one set of source-space runs.
+
+    ``dropped_out``, if given, is passed straight through to
+    :func:`_merge` — see its own docstring for what ends up in it and
+    why. Not populated with anything :func:`_orientation_is_plausible`
+    rejects before ``_merge`` ever sees it: that filter exists to catch
+    a rotated pass re-reading text that's ALREADY correctly read in its
+    own proper-angle pass (a false orientation claim, not lost content),
+    a different kind of noise than a genuine drop inside ``_merge``.
+    """
     src_h, src_w = image.shape[:2]
     candidates: list[Detection] = []
 
@@ -122,7 +134,8 @@ def detect_all_orientations(
             if _orientation_is_plausible(candidate):
                 candidates.append(candidate)
 
-    return [_canonicalise_vertical(d) for d in _merge(candidates, iou_threshold)]
+    merged = _merge(candidates, iou_threshold, dropped_out=dropped_out)
+    return [_canonicalise_vertical(d) for d in merged]
 
 
 def _canonicalise_vertical(det: Detection) -> Detection:
@@ -151,6 +164,7 @@ def _merge(
     candidates: list[Detection],
     iou_threshold: float,
     containment_threshold: float = 0.6,
+    dropped_out: list[Detection] | None = None,
 ) -> list[Detection]:
     """Confidence-ranked NMS over both overlap measures.
 
@@ -198,6 +212,16 @@ def _merge(
     a sensible absolute confidence bar (the same 0.85 LOW_CONFIDENCE
     threshold raster/pipeline.py already flags a run at), not out-score
     the fragment it is replacing.
+
+    ``dropped_out``, if given, is appended with every candidate that did
+    NOT make it into the returned list — not for this function's own
+    use, but so a caller can run a completeness check afterwards (see
+    raster/pipeline.py's coverage flag): among everything OCR actually
+    read, was anything substantial and confident left out that no kept
+    run adequately covers? Most drops here are correct and expected (a
+    truncated duplicate, a fragment inside a real run) — it's the
+    caller's job to tell those apart from a genuine miss like the
+    'Vaer. 2' case above, not this function's.
     """
     ordered = sorted(candidates, key=lambda d: (d.conf, len(d.text)), reverse=True)
     kept: list[Detection] = []
@@ -212,9 +236,13 @@ def _merge(
             kept.append(cand)
             continue
         if len(overlapping) > 1:
+            if dropped_out is not None:
+                dropped_out.append(cand)
             continue  # spans multiple real runs — a merged misread, drop it
         best = overlapping[0]
         if len(cand.text) <= len(best.text):
+            if dropped_out is not None:
+                dropped_out.append(cand)
             continue
         beats_margin = cand.conf > best.conf - 0.05
         is_fuller_read_of_a_fragment = (
@@ -223,4 +251,8 @@ def _merge(
         if beats_margin or is_fuller_read_of_a_fragment:
             kept.remove(best)
             kept.append(cand)
+            if dropped_out is not None:
+                dropped_out.append(best)
+        elif dropped_out is not None:
+            dropped_out.append(cand)
     return sorted(kept, key=lambda d: (d.bbox[1], d.bbox[0]))

@@ -18,7 +18,7 @@ import cv2
 import numpy as np
 
 from spejl.detect.ocr import Detection, OcrBackend, RapidOcrBackend
-from spejl.detect.rotations import detect_all_orientations
+from spejl.detect.rotations import _intersection, detect_all_orientations
 from spejl.erase.clean import erase_text
 from spejl.lexicon.snap import snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
@@ -82,6 +82,80 @@ def _upscale_factor(detections: list[Detection]) -> float:
     return 2.0 if median_cap < MIN_CAP_HEIGHT_PX else 1.0
 
 
+# Below this, a dropped candidate is routine noise this NMS pass is
+# SUPPOSED to discard (a stray letter, a truncated duplicate) — not
+# worth a human's attention. Matches _merge's own containment-override
+# floor: a run this short can't clear that path either, so nothing
+# below this length is ever the 'Vaer. 2' shape of loss in the first
+# place.
+_MISSED_TEXT_MIN_LEN = 3
+
+
+def _find_likely_missed_text(
+    dropped: list[Detection], kept: list[Detection]
+) -> list[Flag]:
+    """Coverage check: among everything OCR actually read on a pass,
+    was anything substantial and confident left out that nothing in the
+    final, kept detection set adequately covers?
+
+    Exists because of a real, severe bug this exact question would have
+    caught before a user ever saw it: 'Vaer. 2', read correctly and
+    confidently, lost too strict an NMS tie-break to a stray single-
+    digit fragment and was silently dropped — never erased, never
+    re-rendered, its own source pixels passed straight through the
+    mirror flip as ordinary geometry, genuinely mirrored text on the
+    output. That specific tie-break is fixed (_merge's own docstring),
+    but this is the general defence: whatever else might someday cause
+    OCR's own correct read of something to not survive to the final
+    run list, on this file or a completely different one, this is what
+    would surface it — a flag a human sees, not a silent gap.
+
+    Most drops _merge produces are correct and expected — a genuine
+    duplicate, a fragment properly absorbed into the run it's part of
+    — so this applies two filters before ever calling one worth
+    surfacing: long and confident enough that "it was noise anyway"
+    isn't a plausible explanation (_MISSED_TEXT_MIN_LEN characters,
+    LOW_CONFIDENCE or better — the literal conditions the real
+    'Vaer. 2' case met), AND not already substantially covered by
+    anything that WAS kept (a real duplicate of a kept run is not a
+    loss, it's the NMS pass working as intended).
+
+    "Covered" is deliberately NOT _merge's own _containment(): that
+    helper normalises by the SMALLER box's area, built for "is this
+    small fragment a piece of that other run" — exactly backwards here,
+    where the dropped candidate is typically the BIGGER box and a small
+    kept detection sitting inside a small corner of it would score
+    _containment() near 1.0 while covering almost none of the text.
+    (Confirmed against the real 'Vaer. 2' case: _containment() of its
+    box against the kept '2' fragment's box scores ~1.0 — '2' fully
+    inside 'Vaer. 2' — which is exactly why the first version of this
+    function using it failed to catch the very bug it was written for.)
+    What matters here is directional: what fraction of the DROPPED
+    candidate's OWN area does a kept detection actually cover.
+    """
+    flags: list[Flag] = []
+    for cand in dropped:
+        if len(cand.text) < _MISSED_TEXT_MIN_LEN or cand.conf < LOW_CONFIDENCE:
+            continue
+        cand_area = max(1.0, (cand.bbox[2] - cand.bbox[0]) * (cand.bbox[3] - cand.bbox[1]))
+        covered = any(
+            _intersection(cand.bbox, k.bbox) / cand_area > 0.5 for k in kept
+        )
+        if covered:
+            continue
+        cx, cy = M.bbox_center(cand.bbox)
+        flags.append(
+            Flag(
+                "possible-missed-text",
+                f"OCR read {cand.text!r} (confidence {cand.conf:.2f}) near "
+                f"({cx:.0f}, {cy:.0f}) but it did not survive to the final result "
+                "— confirm nothing was lost here.",
+                "warn",
+            )
+        )
+    return flags
+
+
 def mirror_raster(
     input_path: Path,
     output_path: Path,
@@ -107,14 +181,16 @@ def mirror_raster(
     flags: list[Flag] = []
 
     # ---- S2: detect -------------------------------------------------------
-    detections = detect_all_orientations(image, backend)
+    dropped: list[Detection] = []
+    detections = detect_all_orientations(image, backend, dropped_out=dropped)
     upscale = _upscale_factor(detections)
     protected = protected or []
     if upscale != 1.0:
         image = cv2.resize(
             image, None, fx=upscale, fy=upscale, interpolation=cv2.INTER_LANCZOS4
         )
-        detections = detect_all_orientations(image, backend)
+        dropped = []
+        detections = detect_all_orientations(image, backend, dropped_out=dropped)
         # `protected` regions arrive in the ORIGINAL image's coordinates —
         # the only space the caller can have known before this function
         # decided (internally) to upscale. Every detection and the image
@@ -129,6 +205,7 @@ def mirror_raster(
         )
 
     h, w = image.shape[:2]
+    flags.extend(_find_likely_missed_text(dropped, detections))
 
     # ---- S3 + S4: correct the strings, measure the type -------------------
     runs: list[MirroredRun] = []
