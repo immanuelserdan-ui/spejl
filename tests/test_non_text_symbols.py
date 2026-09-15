@@ -13,9 +13,11 @@ import numpy as np
 import pytest
 
 from spejl.detect.ocr import Detection
+from spejl.lexicon.snap import snap
 from spejl.models import Axis
 from spejl.raster.pipeline import (
     _looks_like_a_graphical_symbol,
+    _looks_like_a_short_unmatched_symbol,
     _looks_like_the_wrong_script,
     mirror_raster,
 )
@@ -53,6 +55,24 @@ def test_looks_like_a_graphical_symbol(text: str, expected: bool):
 )
 def test_looks_like_the_wrong_script(text: str, expected: bool):
     assert _looks_like_the_wrong_script(text) is expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("O", True),       # regression: a spot-elevation marker read as 'O'
+        ("H", True),       # an I-beam/lintel cross-section read as 'H' at 1.00 conf —
+                            # visual resemblance alone, not OCR being unsure
+        ("GO", True),      # two valve/knob icons read as 'GO'
+        ("T", False),      # a real, curated annotation — resolves, not "unknown"
+        ("Qzxwv", False),  # longer nonsense stays a genuine unmatched TEXT read,
+                            # not geometry to leave untouched
+        ("Stue", False),
+        ("2105", False),
+    ],
+)
+def test_looks_like_a_short_unmatched_symbol(text: str, expected: bool):
+    assert _looks_like_a_short_unmatched_symbol(text, snap(text)) is expected
 
 
 class _FixedBackend:
@@ -140,5 +160,34 @@ def test_a_hallucinated_cjk_character_is_not_rendered_either(tmp_path):
     texts = [r.text for r in result.runs]
     assert "Bad" in texts
     assert "一" not in texts
+    flag_codes = {f.code for p in result.document.pages for f in p.flags}
+    assert "non-text-symbol" in flag_codes
+
+
+def test_a_short_unmatched_alnum_read_is_not_rendered_as_garbled_text(tmp_path):
+    """Same failure mode as the arrow/CJK cases above, for the gap
+    neither check can cover on its own: a misread that happens to spell
+    real alphanumeric characters. Confirmed on three separate real
+    files — a spot-elevation marker read as 'O' at 0.56 confidence, an
+    I-beam/lintel cross-section read as 'H' at 1.00 confidence, two
+    valve/knob icons read as 'GO' — none of them real text, all erased
+    and re-rendered as garbage letters over real drafting geometry
+    before this fix.
+    """
+    img = np.full((300, 400, 3), 255, np.uint8)
+    cv2.putText(img, "Entre", (150, 200), cv2.FONT_HERSHEY_SIMPLEX, 0.4, (0, 0, 0), 1, cv2.LINE_AA)
+    src = tmp_path / "plan.png"
+    cv2.imwrite(str(src), img)
+
+    entre = Detection(text="Entre", quad=((148, 192), (185, 192), (185, 205), (148, 205)), conf=0.97)
+    icon = Detection(text="O", quad=((220, 195), (232, 195), (232, 207), (220, 207)), conf=0.56)
+    backend = _FixedBackend([entre, icon], base_size=(300, 400))
+
+    result = mirror_raster(src, tmp_path / "out.png", axis=Axis.VERTICAL, backend=backend)
+
+    texts = [r.text for r in result.runs]
+    assert "Entre" in texts
+    assert "O" not in texts
+
     flag_codes = {f.code for p in result.document.pages for f in p.flags}
     assert "non-text-symbol" in flag_codes

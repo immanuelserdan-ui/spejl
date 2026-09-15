@@ -49,6 +49,25 @@ DIM_MAX_MM = 20000
 # never equal a whole word -- so only Tier 3 needs this guard.
 _MIN_FUZZY_HEAD_LEN = 3
 
+# OCR confusable pairs for single-glyph technical annotations — curated
+# from confirmed real misreads, not a general character-confusion table.
+# 'T' is a real annotation on Danish plans (a floor-drain/plumbing tie-in
+# marker, per the project's own vocabulary); RapidOCR reads it as '1' at
+# 0.755 confidence on a genuine real-plan detection — a small, isolated
+# glyph is exactly OCR's weakest case, and a 'T' with a faint or thin
+# crossbar collapses onto the same single vertical stroke a '1' is. Kept
+# to this one confirmed pair rather than a broad Latin-confusables table:
+# widening it without real evidence for each pair risks "correcting" a
+# genuine short read into the wrong one.
+_ANNOTATION_CONFUSABLES = {"1": "T"}
+
+# Below this, OCR is already flagging its own uncertainty — matches
+# raster/pipeline.py's own LOW_CONFIDENCE threshold, kept as a separate
+# constant here so this module stays self-contained. A confusable
+# substitution only ever applies in this regime: a confident, unambiguous
+# read (anything at or above it) is never second-guessed.
+_CONFUSABLE_CONFIDENCE_CEILING = 0.85
+
 
 @dataclass(frozen=True)
 class SnapResult:
@@ -91,8 +110,15 @@ def _vocabulary() -> tuple[tuple[str, ...], dict[str, str], tuple[str, ...]]:
     return rooms, abbrev, annotations
 
 
-def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
-    """Correct one OCR string against the lexicon, or classify it."""
+def snap(raw: str, *, min_score: float = 82.0, conf: float = 1.0) -> SnapResult:
+    """Correct one OCR string against the lexicon, or classify it.
+
+    ``conf`` is the OCR engine's own confidence for ``raw`` (default 1.0
+    — "trust it" — for callers, chiefly tests, that don't track one).
+    Used only to gate :data:`_ANNOTATION_CONFUSABLES`: a substitution
+    this module cannot verify independently is applied only when OCR
+    itself was already unsure.
+    """
     text = raw.strip()
     if not text:
         return SnapResult(text="", raw=raw, kind="unknown", changed=False, confidence=0.0)
@@ -191,6 +217,25 @@ def snap(raw: str, *, min_score: float = 82.0) -> SnapResult:
     if lowered in abbrev:
         corrected = abbrev[lowered] + sep + tail
         return SnapResult(corrected, raw, "room", corrected != text, 0.9)
+
+    # Last resort, and deliberately last: only once nothing else — exact,
+    # fold, fuzzy, or abbreviation — accounts for this string at all does
+    # a known OCR confusable get a chance, and only when OCR itself was
+    # already unsure (see _ANNOTATION_CONFUSABLES's own comment).
+    if conf < _CONFUSABLE_CONFIDENCE_CEILING:
+        substituted = _ANNOTATION_CONFUSABLES.get(text)
+        if substituted is not None and substituted in annotations:
+            return SnapResult(
+                text=substituted,
+                raw=raw,
+                kind="annotation",
+                changed=True,
+                confidence=conf,
+                warning=(
+                    f"OCR read {raw!r} at {conf:.2f} confidence — corrected to the "
+                    f"visually-confusable annotation {substituted!r}; confirm manually."
+                ),
+            )
 
     return SnapResult(text, raw, "unknown", False, 0.0,
                       "No lexicon match — confirm this string manually.")

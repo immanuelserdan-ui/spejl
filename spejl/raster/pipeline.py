@@ -20,7 +20,7 @@ import numpy as np
 from spejl.detect.ocr import Detection, OcrBackend, RapidOcrBackend
 from spejl.detect.rotations import _intersection, detect_all_orientations
 from spejl.erase.clean import erase_text
-from spejl.lexicon.snap import snap
+from spejl.lexicon.snap import SnapResult, snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
 from spejl.render.text import linework_mask_for, render_run
 from spejl.style.metrics import (
@@ -241,8 +241,33 @@ def mirror_raster(
             )
             continue
 
+        result = snap(det.text, conf=det.conf)
+        if _looks_like_a_short_unmatched_symbol(det.text, result):
+            # The same failure mode as the graphical-symbol check above,
+            # for the case it structurally cannot catch: a misread that
+            # happens to spell real alphanumeric characters, so
+            # `_looks_like_a_graphical_symbol`'s own "no letters or
+            # digits at all" test lets it straight through. Confirmed on
+            # three separate real files: a spot-elevation marker read as
+            # 'O', an I-beam/lintel cross-section read as 'H' at 1.00
+            # confidence (visual resemblance alone, not OCR being
+            # unsure), two valve/knob icons read as 'GO' — none of them
+            # real text, all three erased and re-rendered as garbage
+            # letters over real drafting geometry before this check.
+            # See _looks_like_a_short_unmatched_symbol's own docstring
+            # for why this is safe to leave unmatched-and-short rather
+            # than a new annotation this project hasn't catalogued yet.
+            non_text_flags.append(
+                Flag(
+                    "non-text-symbol",
+                    f"{det.text!r} (OCR confidence {det.conf:.2f}) looks like a "
+                    "drafting symbol, not text — left as geometry, not re-rendered.",
+                    "info",
+                )
+            )
+            continue
+
         text_boxes.append(det.bbox)
-        result = snap(det.text)
         run_flags: list[Flag] = []
         if det.conf < LOW_CONFIDENCE:
             run_flags.append(
@@ -253,7 +278,15 @@ def mirror_raster(
                 Flag("lexicon-snap", f"{result.raw!r} -> {result.text!r}", "info")
             )
         if result.warning:
-            run_flags.append(Flag("implausible", result.warning, "warn"))
+            # A confusable-annotation correction (snap.py's own fallback,
+            # gated on low OCR confidence) is not the same situation as
+            # "nothing in the lexicon accounts for this at all" or an
+            # out-of-range dimension — it found an answer, just one this
+            # module can't verify independently — so it gets its own flag
+            # code rather than being lumped in under "implausible", which
+            # would read as "still unresolved" when it isn't.
+            code = "annotation-confusable" if result.kind == "annotation" and result.changed else "implausible"
+            run_flags.append(Flag(code, result.warning, "warn"))
 
         other_boxes = [d.bbox for d in detections if d is not det]
         style = fit_style(image, result.text, det.bbox, det.angle_deg, other_boxes=other_boxes)
@@ -470,6 +503,37 @@ def _looks_like_a_graphical_symbol(text: str) -> bool:
     lexicon/erase/render path.
     """
     return not any(ch.isalnum() for ch in text)
+
+
+# Every real annotation this project has ever confirmed (H*, T, HS, EL,
+# VVB, GA, ST) is a short, curated, EXACT lexicon entry. A read at or
+# below this length that still comes back kind=="unknown" after the full
+# closed vocabulary — rooms, dimensions, areas, annotations,
+# abbreviations, even the confusable-correction fallback — has nothing
+# to say about it is therefore not a new, not-yet-catalogued annotation;
+# see _looks_like_a_short_unmatched_symbol's own docstring for the real
+# evidence. A longer unmatched string (the existing 'Qzxwv' case) stays
+# outside this net — likelier a genuinely garbled read of real text a
+# human should still see rendered, not geometry to leave untouched.
+_SHORT_UNKNOWN_MAX_LEN = 2
+
+
+def _looks_like_a_short_unmatched_symbol(text: str, result: SnapResult) -> bool:
+    """True for a short OCR read the entire lexicon has nothing to say
+    about — the same failure mode :func:`_looks_like_a_graphical_symbol`
+    exists to catch, for the case that check structurally cannot: a
+    misread that happens to spell real alphanumeric characters, so "no
+    letters or digits at all" lets it straight through.
+
+    Confirmed on three separate real files, none of them real text at
+    all: a spot-elevation marker (a small circle under a short stroke)
+    read as 'O' at 0.56 confidence; an I-beam/lintel cross-section read
+    as 'H' at 1.00 confidence — visual resemblance alone, not OCR being
+    unsure, produced that one; two valve/knob icons read as 'GO'. Every
+    one of them was, before this check, erased and re-rendered as
+    garbage letters directly over real drafting geometry.
+    """
+    return result.kind == "unknown" and len(text) <= _SHORT_UNKNOWN_MAX_LEN
 
 
 # CJK Unified Ideographs, Hiragana/Katakana, Hangul, Cyrillic, Hebrew,

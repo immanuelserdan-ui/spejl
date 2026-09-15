@@ -196,7 +196,13 @@ def test_vr_period_abbreviation_is_a_curated_lexicon_entry():
 @pytest.mark.parametrize(
     ("raw", "would_have_matched"),
     [
-        ("T", "Stue"),
+        # 'T' itself is deliberately not in this list any more: it's now
+        # a curated lexicon annotation (see test_annotation_glyph_is_
+        # recognised and the '1'->'T' confusable tests below), so it
+        # correctly resolves via the annotations tier, not Tier 3 fuzzy
+        # matching — this list is only for letters that are genuinely
+        # neither a room fuzzy-match nor a curated annotation.
+        ("K", "Kammer"),
         ("O", "Køkken"),
         ("H", "Have"),
         ("S", "Stue"),
@@ -228,3 +234,38 @@ def test_a_bare_single_letter_is_never_fuzzy_matched_to_a_full_room_word(
     assert result.kind == "unknown"
     assert result.warning is not None
     assert result.text != would_have_matched
+
+
+def test_low_confidence_one_is_corrected_to_the_confusable_annotation_t():
+    """Regression: a real 'T' annotation glyph (a floor-drain/plumbing
+    marker, per the project's own vocabulary) OCR'd as '1' at 0.755
+    confidence on a real plan — genuinely misread on the SOURCE image,
+    before any mirroring logic ever runs. '1' alone never matches
+    anything else in snap() (too short for Tier 3, not a 2+ digit
+    dimension, not in abbreviations), so without this correction it was
+    rendered as the literal wrong digit with only a generic 'no lexicon
+    match' warning to show for it.
+    """
+    result = snap("1", conf=0.755)
+    assert result.text == "T"
+    assert result.kind == "annotation"
+    assert result.changed
+    assert result.warning is not None
+
+
+def test_confusable_correction_is_not_applied_to_a_confident_read():
+    """The substitution only ever fires when OCR itself was already
+    unsure — a confident '1' (there is currently no path that produces
+    one, since a bare single digit never matches the 2-5 digit dimension
+    pattern either way, but the gate must hold regardless) is left
+    exactly as read, never second-guessed into a different character."""
+    result = snap("1", conf=0.99)
+    assert result.text == "1"
+    assert result.kind == "unknown"
+
+
+def test_bare_t_resolves_directly_as_the_curated_annotation():
+    result = snap("T")
+    assert result.kind == "annotation"
+    assert result.text == "T"
+    assert not result.changed
