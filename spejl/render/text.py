@@ -1,6 +1,15 @@
 """Stage S7 — draw each run upright at its mirrored anchor.
 
-Three things this module refuses to do, each of which would show:
+Type goes **behind** the drawing. The sheet is composited in two layers
+— paper, then the re-rendered runs, then the geometry over the top — so
+no label can paint over a wall, an arc or a dimension line. The two
+layers are not equally recoverable: a run is reconstructed from a string
+and a measured style, and can be redrawn at any time, whereas linework a
+glyph painted over is simply gone from the output. Keeping the drawing
+in front means a mis-anchored label is a legible mistake sitting under
+intact geometry rather than a silent hole in the plan.
+
+Three further things this module refuses to do, each of which would show:
 
 * **Anchor on a corner.** A re-rendered string is never exactly the
   original's pixel width, so corner-anchoring drifts. The centre is
@@ -53,6 +62,13 @@ class RenderedRun:
     ink_width: float
     ink_height: float
     collided: bool
+    # Share of this run's own ink the drawing layer covers, 0.0 to 1.0.
+    # A few percent is ordinary — a dimension number sitting on its own
+    # dimension line — but a run that is mostly or entirely behind
+    # geometry is unreadable on the output sheet, which is the one thing
+    # drawing-over-type costs and therefore the one thing worth
+    # reporting. Zero when no drawing layer was supplied.
+    hidden: float = 0.0
 
 
 def _draw_string(
@@ -107,6 +123,7 @@ def render_run(
     style: TextStyle,
     target_size: tuple[float, float] | None = None,
     linework_mask: np.ndarray | None = None,
+    drawing_alpha: np.ndarray | None = None,
 ) -> RenderedRun:
     """Composite ``text`` onto ``canvas`` (BGR, modified in place).
 
@@ -118,6 +135,13 @@ def render_run(
     the *same* mask object to every run in a page (see raster/pipeline.py)
     gets collision detection against every run rendered so far, not just
     the static geometry the mask started with.
+
+    ``drawing_alpha`` (see :func:`drawing_alpha_for`) is the geometry
+    layer this run is drawn UNDERNEATH, and is never modified — unlike
+    ``linework_mask`` it describes the sheet's drawing alone, so runs
+    hide behind the plan but not behind each other, and the layer stays
+    identical no matter what order the page's runs happen to be drawn
+    in.
     """
     px_size, tracking = style.px_size, style.tracking  # tracking: em-relative
     shrunk = False
@@ -182,7 +206,7 @@ def render_run(
         # Spejl's angle convention (90° = reads bottom-to-top).
         tile = tile.rotate(angle_deg, expand=True, resample=Image.BICUBIC)
 
-    collided = _composite(canvas, tile, center, linework_mask)
+    collided, hidden = _composite(canvas, tile, center, linework_mask, drawing_alpha)
     return RenderedRun(
         shrunk=shrunk,
         final_px_size=px_size,
@@ -190,6 +214,7 @@ def render_run(
         ink_width=ink_width,
         ink_height=ink_height,
         collided=collided,
+        hidden=hidden,
     )
 
 
@@ -198,8 +223,11 @@ def _composite(
     tile: Image.Image,
     center: tuple[float, float],
     linework_mask: np.ndarray | None,
-) -> bool:
-    """Alpha-blend ``tile`` centred on ``center``; report any collision."""
+    drawing_alpha: np.ndarray | None = None,
+) -> tuple[bool, float]:
+    """Alpha-blend ``tile`` centred on ``center``, *underneath* the
+    drawing layer; report any collision and how much of the run the
+    drawing ended up covering."""
     h, w = canvas.shape[:2]
     tw, th = tile.width, tile.height
     x0 = int(round(center[0] - tw / 2))
@@ -210,21 +238,40 @@ def _composite(
     dx0, dy0 = max(0, x0), max(0, y0)
     dx1, dy1 = min(w, x0 + tw), min(h, y0 + th)
     if dx1 <= dx0 or dy1 <= dy0:
-        return False
+        return False, 0.0
 
     patch = np.array(tile)[sy0:sy0 + (dy1 - dy0), sx0:sx0 + (dx1 - dx0)]
     if patch.size == 0:
-        return False
+        return False, 0.0
 
     alpha = (patch[:, :, 3:4].astype(np.float32)) / 255.0
     rgb = patch[:, :, :3].astype(np.float32)
     bgr = rgb[:, :, ::-1]  # PIL is RGB, OpenCV canvas is BGR
 
     region = canvas[dy0:dy1, dx0:dx1].astype(np.float32)
-    canvas[dy0:dy1, dx0:dx1] = (bgr * alpha + region * (1 - alpha)).astype(np.uint8)
+    blended = bgr * alpha + region * (1 - alpha)
+
+    hidden = 0.0
+    if drawing_alpha is not None:
+        # The z-order this module exists to guarantee. Interpolating
+        # back toward the untouched `region` by the drawing's own
+        # coverage is what "type goes behind the drawing" means in a
+        # flattened raster: where the geometry covers a pixel fully the
+        # canvas keeps precisely the byte it already held, so a run
+        # cannot alter linework at all; where it covers partially — the
+        # antialiased flank of every line on the sheet — the two mix in
+        # proportion, so the type fades under the line's own soft edge
+        # instead of stopping dead against a hard cut-out of it.
+        over = drawing_alpha[dy0:dy1, dx0:dx1][:, :, None]
+        blended = region * over + blended * (1 - over)
+        own_ink = alpha[:, :, 0] > 0.5
+        if own_ink.any():
+            hidden = float(over[:, :, 0][own_ink].mean())
+
+    canvas[dy0:dy1, dx0:dx1] = blended.astype(np.uint8)
 
     if linework_mask is None:
-        return False
+        return False, hidden
     ink_here = (patch[:, :, 3] > 128)
     region_mask = linework_mask[dy0:dy1, dx0:dx1]  # a view, not a copy
     lines_here = region_mask > 0
@@ -239,7 +286,7 @@ def _composite(
     # label, with the pipeline's own collision flag staying silent
     # because it only ever compared against linework).
     region_mask[ink_here] = 255
-    return collided
+    return collided, hidden
 
 
 def linework_mask_for(image: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
@@ -251,3 +298,52 @@ def linework_mask_for(image: np.ndarray, text_mask: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
     _t, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
     return cv2.bitwise_and(dark, cv2.bitwise_not(text_mask))
+
+
+def drawing_alpha_for(image: np.ndarray) -> np.ndarray:
+    """How much of each pixel the drawing layer covers, 0.0 to 1.0.
+
+    Built from the type-free plate, so every dark pixel left on it *is*
+    geometry and the layer needs no text mask to stay out of: this is
+    the whole sheet's linework — walls, arcs, dimension and witness
+    lines, fixtures — as the thing every re-rendered run is composited
+    underneath.
+
+    Coverage, not a binary mask. Every line on a CAD export is
+    antialiased, and a hard 0/1 occluder would stop the type dead
+    against the line's thresholded core while the line's own grey flank
+    kept blending over it — a bright fringe tracing every wall that a
+    label passes behind. Grading the occlusion by the same coverage the
+    export itself drew means the type simply disappears under the line,
+    edge included.
+
+    Ink and paper levels come from Otsu's own split rather than a fixed
+    percentile: what share of a sheet is ink swings wildly between a
+    dense plan and a sparse detail, and a decile cut tuned for one
+    measures "ink" as near-paper on the other — which would collapse
+    the span below, drive this alpha to 1.0 across the entire sheet, and
+    hide every label on it completely.
+    """
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if image.ndim == 3 else image
+    level, dark = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+
+    flat = gray.reshape(-1)
+    is_dark = flat <= level
+    if not is_dark.any() or is_dark.all():
+        return np.zeros(gray.shape, dtype=np.float32)  # blank or solid: nothing to hide behind
+
+    ink = float(np.median(flat[is_dark]))
+    paper = float(np.median(flat[~is_dark]))
+    alpha = np.clip(
+        (paper - gray.astype(np.float32)) / max(1.0, paper - ink), 0.0, 1.0
+    )
+
+    # Confined to the geometry's own pixels plus the one-pixel fringe
+    # around them, dilated from the thresholded core so the antialiased
+    # flank the paragraph above is about stays inside. A scanned or
+    # JPEG-compressed sheet's paper is nowhere near uniform, and without
+    # this every run on such a sheet would be faintly greyed by the
+    # page's own noise — an occluder covering the whole sheet at a few
+    # percent — rather than only where real linework crosses it.
+    alpha[cv2.dilate(dark, np.ones((3, 3), np.uint8)) == 0] = 0.0
+    return alpha

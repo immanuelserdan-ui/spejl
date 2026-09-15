@@ -7,6 +7,13 @@ The load-bearing property, and the reason the stages are in this order:
 text attributes are extracted *before* the flip and applied *after* it,
 so no glyph ever passes through the reflection. The flip sees a plate
 with no type on it at all.
+
+S7 then composites in layers rather than simply painting: paper, the
+re-rendered runs, and the sheet's own geometry over the top. The two
+kinds of content are not equally recoverable — a run can be redrawn
+from its string and measured style at any time, whereas linework a
+glyph painted over is gone from the output — so where they compete for
+a pixel, the drawing wins. See render/text.py.
 """
 
 from __future__ import annotations
@@ -22,7 +29,7 @@ from spejl.detect.rotations import _intersection, detect_all_orientations
 from spejl.erase.clean import erase_text
 from spejl.lexicon.snap import SnapResult, snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
-from spejl.render.text import linework_mask_for, render_run
+from spejl.render.text import drawing_alpha_for, linework_mask_for, render_run
 from spejl.style.metrics import (
     TextStyle,
     fit_style,
@@ -36,6 +43,17 @@ from spejl.transform import mirror as M
 MIN_CAP_HEIGHT_PX = 14.0   # below this, upscale before OCR (build plan S1)
 REFUSE_CAP_HEIGHT_PX = 8.0  # below this, refuse rather than mangle
 LOW_CONFIDENCE = 0.85
+
+# Share of a run's own ink the drawing may cover before the run counts as
+# buried rather than merely crossed. A dimension number drawn on its own
+# dimension line — drafting convention, not a fault — loses only the few
+# percent of its ink the line actually runs through, so a threshold near
+# zero would fire on most correctly-placed numbers on a real sheet (the
+# same false-positive trap documented at length in render/text.py's
+# reverted proximity check). Half the run's ink gone is past any amount
+# a single crossing line can account for, and means the label has landed
+# on poché or a fixture.
+_MOSTLY_HIDDEN = 0.5
 
 
 @dataclass
@@ -363,6 +381,16 @@ def mirror_raster(
     # 1..N-1 already drawn on this same canvas, not just the static
     # linework it started as.
     lines = linework_mask_for(flipped, flipped_text_mask)
+    # The drawing layer every run below is composited UNDERNEATH, so no
+    # re-rendered label can paint over a wall, an arc or a dimension
+    # line (see render/text.py's module docstring for why the drawing
+    # outranks the type). Captured once, here, before a single run is
+    # drawn — not rebuilt per run — so that it describes the plan alone.
+    # Rebuilding it inside the loop would fold each run's own fresh ink
+    # into the "drawing" the next run hides behind, and labels would
+    # start occluding each other in page order, which is neither what
+    # this layer means nor stable under a reordering of `runs`.
+    drawing = drawing_alpha_for(flipped)
     for run in runs:
         run_target_size = _target_size(run)
         target_along, target_across = run_target_size
@@ -374,6 +402,7 @@ def mirror_raster(
             style=run.style,
             target_size=run_target_size,
             linework_mask=lines,
+            drawing_alpha=drawing,
         )
         if rendered.shrunk:
             # The shrink-to-fit loop runs a bounded number of attempts
@@ -406,11 +435,30 @@ def mirror_raster(
                 run.flags.append(
                     Flag("fit-shrunk", f"{run.text!r} reduced to fit its original box.", "info")
                 )
-        if rendered.collided:
+        if rendered.hidden > _MOSTLY_HIDDEN:
+            # Drawing-over-type costs exactly one thing, and this is it:
+            # a run whose mirrored anchor lands on solid geometry is now
+            # *under* that geometry rather than punched through it. That
+            # is the right trade — the plan stays intact and the label
+            # is still recoverable — but it is not something to let pass
+            # silently, because the label is unreadable on the output
+            # sheet until a human moves it. Reported INSTEAD of
+            # `collision`, not alongside it: being mostly buried
+            # strictly implies touching, and two warnings about one
+            # event would just make the review list harder to read.
+            run.flags.append(
+                Flag(
+                    "hidden-behind-linework",
+                    f"{run.text!r} lands on geometry that covers {rendered.hidden:.0%} of it — "
+                    "the drawing is kept in front, so the label reads poorly or not at all.",
+                    "warn",
+                )
+            )
+        elif rendered.collided:
             run.flags.append(
                 Flag(
                     "collision",
-                    f"{run.text!r} overlaps linework or another label after mirroring.",
+                    f"{run.text!r} touches linework or another label after mirroring.",
                     "warn",
                 )
             )

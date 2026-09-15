@@ -165,3 +165,107 @@ def test_a_line_that_extends_well_past_its_box_is_still_restored():
     assert result.repaired_px > 0
     # The line must reappear under where the box was.
     assert result.image[80, 100].max() < 50
+
+
+def test_a_repaired_line_keeps_its_antialiased_flank_not_just_its_core():
+    """Regression: the erase and the repair disagreed on where a line
+    ends, and the gap between them was a visible nick.
+
+    ``build_text_mask`` erases everything below *local* paper — a
+    deliberately low bar, so antialiased glyph fringes go too (see
+    PAPER_TOLERANCE) — while ``line_pixel_mask`` labels linework by
+    Otsu, which keeps only each line's solid core. So the erase
+    consistently took one pixel more of every line than the repair knew
+    to give back: repaired lines came out a pixel thin down one side,
+    for the exact width of the label that crossed them. On the golden
+    fixture that pixel accounted for 190 of the 319 pixels of real
+    linework the pipeline was losing.
+
+    The grey flank here is what an antialiased CAD export actually
+    produces, and is dark enough for the erase to take but too light for
+    Otsu to call linework — the precise gap between the two thresholds.
+    """
+    img = np.full((160, 200, 3), 255, np.uint8)
+    img[79:82, :] = 0        # solid core, Otsu sees this
+    img[78, :] = 150         # antialiased flank, only the erase sees it
+    img[82, :] = 150
+    box = (80.0, 70.0, 120.0, 90.0)
+
+    result = erase_text(img, [box])
+
+    under_the_box = result.image[:, 90:110]
+    assert under_the_box[80].max() < 50, "core not repaired"
+    assert under_the_box[78].max() < 200, "flank left erased — the nick this test is about"
+    assert under_the_box[82].max() < 200
+
+
+def test_a_repaired_line_has_the_same_weight_as_its_own_continuation():
+    """The flank is restored at the line's own grey, not filled solid.
+    Filling it with ink would thicken the line — the one thing
+    _restore_line_pixels promises it never does — so the repaired
+    stretch has to match the profile of the same line a few pixels
+    outside the box, top edge, core and bottom edge alike.
+    """
+    img = np.full((160, 200, 3), 255, np.uint8)
+    img[79:82, :] = 0
+    img[78, :] = 150
+    img[82, :] = 150
+    box = (80.0, 70.0, 120.0, 90.0)
+
+    result = erase_text(img, [box])
+
+    # Inside the erased box, the line must look exactly like the stretch
+    # of itself just outside it.
+    repaired = result.image[76:85, 90:110]
+    untouched = img[76:85, 10:30]
+    assert np.array_equal(repaired.mean(axis=1).round(), untouched.mean(axis=1).round())
+
+
+def test_a_repair_still_cannot_paint_outside_the_erased_footprint():
+    """The flank band is dilated, so it is worth pinning down that the
+    dilation cannot reach pixels the erase never touched: the band is
+    intersected with the erase mask last, and everything beyond the box
+    must come through the pipeline byte-identical."""
+    img = np.full((160, 200, 3), 255, np.uint8)
+    img[79:82, :] = 0
+    img[78, :] = 150
+    img[82, :] = 150
+    box = (80.0, 70.0, 120.0, 90.0)
+
+    result = erase_text(img, [box])
+
+    assert np.array_equal(result.image[:, :60], img[:, :60])
+    assert np.array_equal(result.image[:, 140:], img[:, 140:])
+    assert np.array_equal(result.image[:60, :], img[:60, :])
+
+
+def test_a_repair_does_not_paint_the_old_glyph_back_onto_the_line_it_crossed():
+    """The trap in repairing a line from its own original pixels: where
+    a glyph sat ON the line, those pixels are part glyph, so restoring
+    them faithfully stamps the old, pre-mirror string back into the
+    line — which then survives into the mirrored sheet as a ghost of
+    text that is supposed to have moved.
+
+    Invisible in the ordinary black-type-on-black-linework case, and
+    plainly legible the moment the two differ in tone, which is why the
+    mark here is *lighter* than the wall it crosses (a dark grey
+    annotation over black poché). The line's core is therefore repainted
+    flat, in ink — a flat fill cannot reproduce a glyph shape at all —
+    and only the flank, where no flat value would be right, comes from
+    the original.
+
+    The mark stays dark enough to fall on the ink side of Otsu's split,
+    so the wall remains one solid component and this test isolates the
+    repair's choice of *value*. A mark light enough to punch a hole in
+    the binary would instead break the wall apart for
+    :func:`line_pixel_mask`, which is a different matter entirely.
+    """
+    img = np.full((160, 200, 3), 255, np.uint8)
+    img[70:90, :] = 0                 # a thick black wall, full width
+    img[76:84, 95:105] = 60           # a dark grey mark on it, label-shaped
+    box = (85.0, 65.0, 115.0, 95.0)   # the label box around that mark
+
+    result = erase_text(img, [box])
+
+    wall = cv2.cvtColor(result.image[74:86, 92:108], cv2.COLOR_BGR2GRAY)
+    assert wall.max() == 0, f"the grey mark survived the erase at {wall.max()}, back on the wall"

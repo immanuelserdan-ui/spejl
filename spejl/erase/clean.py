@@ -243,7 +243,7 @@ def erase_text(
 
     repaired = 0
     if lines_before is not None:
-        repaired = _restore_line_pixels(work, lines_before, mask, boxes, dilate_px)
+        repaired = _restore_line_pixels(work, image, lines_before, mask, boxes, dilate_px)
 
     return EraseResult(image=work, mask=mask, repaired_px=repaired, flags=tuple(flags))
 
@@ -294,22 +294,54 @@ _MIN_LINE_EXTENSION_PX = 20.0
 
 def _restore_line_pixels(
     image: np.ndarray,
+    original: np.ndarray,
     lines_before: np.ndarray,
     mask: np.ndarray,
     boxes: list[tuple[float, float, float, float]],
     dilate_px: int,
 ) -> int:
-    """Repaint exactly the long-line pixels that the erase removed.
+    """Repaint the long-line pixels that the erase removed.
 
     Only the intersection of (was linework) and (was erased) is touched,
-    so a repair can never thicken, shift, or invent linework — it can
-    only put back what was demonstrably there a moment ago.
+    so a repair can never shift or invent linework — it can only put
+    back what was demonstrably there a moment ago.
 
     Restricted to connected components of ``lines_before`` that actually
     extend past at least one text box they overlap (see
     ``_MIN_LINE_EXTENSION_PX``) — a component fully contained inside the
     box it was found in is a glyph stroke line_pixel_mask mistook for
     linework, not a real line the erase needs to repair.
+
+    A line is repaired in two bands, because its core and its edge want
+    different answers:
+
+    * **The core** — the component itself, what Otsu called linework —
+      is repainted flat, in the sheet's own ink colour. Faithfully
+      restoring each pixel's ORIGINAL value here looks more honest and
+      is not: where a glyph sat ON a line, those original pixels are
+      part glyph, so restoring them paints the old, pre-mirror string
+      back onto the line it crossed. Invisible for the ordinary case of
+      black type on black linework, and a clearly legible ghost the
+      moment the two differ in tone — a grey annotation over a black
+      wall leaves its own silhouette sitting in the wall. A flat fill
+      cannot reproduce a glyph shape at all.
+    * **The flank** — one pixel beyond the core — is restored from
+      ``original``, because there is no flat value that would be right.
+      ``lines_before`` is thresholded by Otsu, whereas
+      :func:`build_text_mask` erases everything below *local* paper, a
+      deliberately lower bar (see ``PAPER_TOLERANCE``). So the erase
+      consistently takes one pixel more of every line than Otsu ever
+      labelled as line: its antialiased edge. Leaving that pixel out
+      thinned every repaired line down both sides for exactly the width
+      of the label crossing it — 190 of the 319 pixels of real linework
+      the golden fixture was losing. Filling it with solid ink instead
+      would thicken the line, which is the one thing the paragraph
+      above promises never happens; the original grey is the line's own
+      edge ramp and is the only value that restores the weight it had.
+
+    One dilation step, not more: on the golden fixture it recovers those
+    190 pixels while touching no glyph pixel at all, where a second step
+    gains 3 more and starts eating glyphs.
     """
     num_labels, labels, stats, _centroids = cv2.connectedComponentsWithStats(
         lines_before, connectivity=8
@@ -340,11 +372,18 @@ def _restore_line_pixels(
         return 0
 
     component_mask = np.isin(labels, list(genuine)).astype(np.uint8) * 255
-    restore = cv2.bitwise_and(component_mask, mask)
-    count = int(np.count_nonzero(restore))
-    if count:
-        image[restore > 0] = _darkest_colour(image)
-    return count
+    band = cv2.dilate(component_mask, np.ones((3, 3), np.uint8))
+    # Intersected with `mask` last, so neither band can reach a pixel the
+    # erase itself did not take — a repair still cannot paint outside the
+    # footprint it is repairing.
+    core = cv2.bitwise_and(component_mask, mask) > 0
+    flank = (cv2.bitwise_and(band, mask) > 0) & ~core
+
+    if core.any():
+        image[core] = _darkest_colour(image)
+    if flank.any():
+        image[flank] = original[flank]
+    return int(np.count_nonzero(core) + np.count_nonzero(flank))
 
 
 def _darkest_colour(image: np.ndarray) -> np.ndarray:

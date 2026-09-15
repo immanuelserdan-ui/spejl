@@ -28,6 +28,19 @@ text drawn over linework, re-rendered type within ~2% of the source's
 measured ink size, and mirroring twice still comes back at 100% accuracy
 — see `tests/test_raster_pipeline.py`.
 
+**The drawing outranks the type.** A mirrored sheet carries two kinds of
+content and they are not equally recoverable: a text run is
+reconstructed — Spejl knows the string, the measured style and the
+mirrored anchor, and can redraw it at any time — while linework is not
+reconstructed at all, only flipped. So the two are composited in that
+order, paper then type then geometry, and a re-rendered label that lands
+on a wall, an arc or a dimension line is drawn *underneath* it rather
+than through it. A mis-anchored label is then a legible mistake sitting
+under an intact plan instead of a silent hole in one. The cost is that
+such a label reads poorly or not at all, so a run the geometry mostly
+covers is flagged `hidden-behind-linework` for review rather than
+passing quietly. See `tests/test_drawing_z_order.py`.
+
 ```bash
 spejl mirror plan.png --axis v      # same CLI as the vector path
 ```
@@ -143,7 +156,7 @@ spejl/
 ├── lexicon/               Danish plan vocabulary + three-tier snap (S3)
 ├── style/metrics.py       measure ink/paper/size/tracking from pixels (S4)
 ├── erase/clean.py         local-paper erase + line-pixel repair (S5)
-├── render/text.py         supersampled re-render, fit-to-box, collision (S7)
+├── render/text.py         supersampled re-render behind the drawing layer (S7)
 ├── raster/pipeline.py     wires S1–S7 together — the Route B entry point
 ├── qa/
 │   ├── fixture_gen.py     golden fixture with free ground truth (vector-drawn)
@@ -161,6 +174,7 @@ tests/
 ├── test_lexicon.py         Danish diacritic + dimension-plausibility snap
 ├── test_detect_ocr.py      detection gates (marked slow — loads OCR models)
 ├── test_raster_pipeline.py Route B round-trip: mirror -> OCR the output -> score
+├── test_drawing_z_order.py geometry stays in front of, and intact under, the type
 ├── test_erase_clean.py, test_style_metrics.py, test_render_text.py,
 │   test_rotations_merge.py, test_protected_regions.py, test_qa_metrics.py
 │                          edge cases from the code review pass

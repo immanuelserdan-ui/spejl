@@ -1,12 +1,13 @@
-"""render/text.py's shrink-to-fit guard — no OCR, no image pipeline,
-just the renderer against a synthetic TextStyle."""
+"""render/text.py's shrink-to-fit guard and its drawing-over-type
+z-order — no OCR, no image pipeline, just the renderer against a
+synthetic TextStyle."""
 
 from __future__ import annotations
 
 import numpy as np
 import pytest
 
-from spejl.render.text import render_run
+from spejl.render.text import drawing_alpha_for, render_run
 from spejl.style.metrics import TextStyle, resolve_font
 
 
@@ -155,3 +156,114 @@ def test_two_runs_far_apart_do_not_collide(font_path: str):
         canvas, "Stue", (250, 250), 0.0, _style(font_path), linework_mask=shared_mask
     )
     assert not second.collided
+
+
+# ---------------------------------------------------------------------------
+# Z-order: type goes behind the drawing
+# ---------------------------------------------------------------------------
+
+
+def _plate_with_linework() -> np.ndarray:
+    """A scrap of plan: poché wall, a dimension line, a door-swing arc."""
+    import cv2
+
+    plate = np.full((260, 520, 3), 255, np.uint8)
+    cv2.rectangle(plate, (0, 0), (519, 18), (0, 0, 0), -1)
+    cv2.line(plate, (0, 130), (519, 130), (0, 0, 0), 2)
+    cv2.ellipse(plate, (40, 250), (190, 190), 0, -90, 0, (0, 0, 0), 2)
+    cv2.line(plate, (260, 40), (260, 240), (0, 0, 0), 1)
+    return plate
+
+
+def test_a_run_drawn_over_linework_leaves_that_linework_untouched(font_path: str):
+    """The guarantee the drawing layer exists to make: geometry is the
+    authoritative content and type is reconstructed, so a re-rendered
+    run may never alter a wall, an arc or a dimension line — whatever
+    its anchor, size or colour.
+
+    Checked in *grey* ink rather than black on purpose. Black type over
+    black linework is indistinguishable from the linework itself, so a
+    naive over-composite passes that test by accident while still
+    overwriting every pixel it lands on; the earlier failure this
+    covers was only ever visible where type and geometry differed in
+    tone — an antialiased glyph flank lightening a solid line, or a
+    grey annotation drawn across one.
+    """
+    plate = _plate_with_linework()
+    alpha = drawing_alpha_for(plate)
+    style = TextStyle(
+        font_path=font_path, px_size=34, tracking=0.0,
+        ink=(128, 128, 128), paper=(255, 255, 255), cap_height_px=24.0,
+    )
+
+    canvas = plate.copy()
+    render_run(canvas, "1383", (250, 130), 0.0, style, drawing_alpha=alpha)
+
+    solid = alpha >= 0.999
+    assert solid.sum() > 0, "fixture has no fully-covered drawing pixels to protect"
+    assert np.array_equal(canvas[solid], plate[solid])
+
+
+def test_without_a_drawing_layer_the_same_run_does_damage_that_linework(font_path: str):
+    """The negative half of the test above — proof it is testing
+    something. Same plate, same run, no layer: the type wins, which is
+    precisely the behaviour the layer replaces."""
+    plate = _plate_with_linework()
+    alpha = drawing_alpha_for(plate)
+    style = TextStyle(
+        font_path=font_path, px_size=34, tracking=0.0,
+        ink=(128, 128, 128), paper=(255, 255, 255), cap_height_px=24.0,
+    )
+
+    canvas = plate.copy()
+    render_run(canvas, "1383", (250, 130), 0.0, style)
+
+    solid = alpha >= 0.999
+    assert not np.array_equal(canvas[solid], plate[solid])
+
+
+def test_the_drawing_layer_is_never_mutated_by_the_runs_drawn_under_it(font_path: str):
+    """Unlike the collision mask, which every run stamps itself into,
+    the drawing layer describes the plan alone. If a run's own ink leaked
+    into it, later runs would start hiding behind earlier ones and the
+    result would depend on the order `runs` happens to be in."""
+    plate = _plate_with_linework()
+    alpha = drawing_alpha_for(plate)
+    before = alpha.copy()
+
+    canvas = plate.copy()
+    render_run(canvas, "Entre", (250, 200), 0.0, _style(font_path, 34), drawing_alpha=alpha)
+    render_run(canvas, "Bad", (250, 200), 0.0, _style(font_path, 34), drawing_alpha=alpha)
+
+    assert np.array_equal(alpha, before)
+
+
+def test_hidden_reports_how_much_of_a_run_the_drawing_covers(font_path: str):
+    """`hidden` is what raster/pipeline.py escalates on: a run buried in
+    poché is unreadable and needs a human, a run merely crossed by its
+    own dimension line does not."""
+    plate = _plate_with_linework()
+    alpha = drawing_alpha_for(plate)
+    style = _style(font_path, 30)
+
+    in_the_clear = render_run(plate.copy(), "Stue", (400, 210), 0.0, style, drawing_alpha=alpha)
+    buried = render_run(plate.copy(), "Stue", (260, 9), 0.0, style, drawing_alpha=alpha)
+
+    assert in_the_clear.hidden < 0.05
+    assert buried.hidden > 0.9
+
+
+def test_drawing_alpha_is_zero_on_paper_and_one_on_ink(font_path: str):
+    plate = _plate_with_linework()
+    alpha = drawing_alpha_for(plate)
+
+    assert alpha[210, 400] == pytest.approx(0.0)   # open floor
+    assert alpha[9, 260] == pytest.approx(1.0)     # solid poché wall
+
+
+def test_drawing_alpha_of_a_blank_sheet_hides_nothing():
+    """Otsu has no split to find on an empty sheet. The layer must come
+    back empty rather than saturating and hiding every label on the
+    page."""
+    blank = np.full((80, 80, 3), 255, np.uint8)
+    assert not drawing_alpha_for(blank).any()
