@@ -61,3 +61,47 @@ def test_a_fragment_fully_inside_a_kept_run_is_suppressed():
     ]
     kept = _merge(candidates, iou_threshold=0.3, containment_threshold=0.6)
     assert [d.text for d in kept] == ["Bad"]
+
+
+def test_a_correct_full_read_is_not_dropped_for_a_perfect_confidence_fragment():
+    """Regression: on a real plan, a rotated pass misread the trailing
+    '2' of 'Vaer. 2' as a lone, trivially easy digit at PERFECT 1.000
+    confidence -- kept ahead of the correct 'Vaer. 2' read (0.949, an
+    honest score for a much longer, harder read). The old tie-break
+    (`cand.conf > best.conf - 0.05`) required 'Vaer. 2' to clear 0.95
+    to reclaim its own territory from the fragment; it missed by one
+    thousandth, so the ENTIRE correct run was silently dropped.
+
+    That's a materially worse failure than a wrong label: a dropped run
+    is never added to text_boxes, so it's never erased -- its raw
+    source pixels pass straight through the mirror flip as ordinary
+    geometry, genuinely mirrored text on the output, the one failure
+    mode this whole application exists to prevent.
+
+    A single-digit fragment scoring 1.000 is not more trustworthy than
+    a 7-character run scoring 0.949 -- it's just an easier read. When
+    the shorter incumbent's box sits almost entirely inside the longer
+    candidate's own box (near-total containment, not just overlap),
+    that's near-unambiguous evidence it's a fragment of the SAME text,
+    so the longer read only needs to clear a sane absolute confidence
+    floor, not out-score the fragment.
+    """
+    candidates = [
+        _det("Vaer. 2", (1136, 1298, 1303, 1349), 0.949),
+        _det("2", (1268, 1301, 1300, 1344), 1.000),  # inside 'Vaer. 2', a rotated-pass misread
+    ]
+    kept = _merge(candidates, iou_threshold=0.3, containment_threshold=0.6)
+    assert [d.text for d in kept] == ["Vaer. 2"]
+
+
+def test_a_low_confidence_long_candidate_still_loses_to_a_good_short_fragment():
+    """The new containment-based override requires the longer candidate
+    to clear an absolute confidence floor (0.85) -- it must not let a
+    genuinely bad long misread steal territory just because its box
+    happens to contain a good short read."""
+    candidates = [
+        _det("2", (10, 0, 30, 20), 0.99),
+        _det("Zgarbled9", (0, 0, 60, 20), 0.60),  # contains '2's box, but a poor read
+    ]
+    kept = _merge(candidates, iou_threshold=0.3, containment_threshold=0.6)
+    assert [d.text for d in kept] == ["2"]

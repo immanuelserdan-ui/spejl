@@ -173,6 +173,31 @@ def _merge(
     Single-run truncation correction (the designed case, e.g. '105' ->
     '2105') only ever has one overlapping incumbent, so this leaves that
     path unchanged.
+
+    The ``cand.conf > best.conf - 0.05`` margin on "longer text wins" is
+    itself a trap for the exact case it exists to fix, confirmed on a
+    real plan: a rotated pass misread the trailing digit of 'Vaer. 2' as
+    a lone, trivially easy '2' at PERFECT 1.000 confidence, kept ahead
+    of the correct seven-character 'Vaer. 2' (0.949 — an honest score
+    for a longer, harder read, not a sign of anything wrong with it).
+    0.949 misses a 0.05 margin below 1.000 by one thousandth, so the
+    entire correct run was silently dropped — never erased, never
+    re-rendered, its raw source pixels left to pass straight through
+    the mirror flip as ordinary geometry: genuinely mirrored text, the
+    one failure mode this whole application exists to prevent. A
+    single-digit fragment scoring 1.000 is not meaningfully MORE
+    trustworthy than a 7-character run scoring 0.949; it is just an
+    easier read, and comparing raw confidence across such different
+    string lengths at a fixed few-point margin doesn't hold up. When
+    the shorter incumbent's box sits almost ENTIRELY inside the longer
+    candidate's own box (containment > 0.9 — a near-total subset
+    relationship, not just heavy overlap), that is near-unambiguous
+    evidence the short one is a fragment of the SAME physical text the
+    long one read more completely, not independent competing evidence
+    about different content — so the longer candidate only has to clear
+    a sensible absolute confidence bar (the same 0.85 LOW_CONFIDENCE
+    threshold raster/pipeline.py already flags a run at), not out-score
+    the fragment it is replacing.
     """
     ordered = sorted(candidates, key=lambda d: (d.conf, len(d.text)), reverse=True)
     kept: list[Detection] = []
@@ -189,7 +214,13 @@ def _merge(
         if len(overlapping) > 1:
             continue  # spans multiple real runs — a merged misread, drop it
         best = overlapping[0]
-        if len(cand.text) > len(best.text) and cand.conf > best.conf - 0.05:
+        if len(cand.text) <= len(best.text):
+            continue
+        beats_margin = cand.conf > best.conf - 0.05
+        is_fuller_read_of_a_fragment = (
+            _containment(best.bbox, cand.bbox) > 0.9 and cand.conf >= 0.85
+        )
+        if beats_margin or is_fuller_read_of_a_fragment:
             kept.remove(best)
             kept.append(cand)
     return sorted(kept, key=lambda d: (d.bbox[1], d.bbox[0]))
