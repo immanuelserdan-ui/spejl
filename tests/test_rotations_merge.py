@@ -4,8 +4,10 @@ synthetic Detection objects — no OCR, no image, just the geometry.
 
 from __future__ import annotations
 
+import numpy as np
+
 from spejl.detect.ocr import Detection
-from spejl.detect.rotations import _merge
+from spejl.detect.rotations import _merge, detect_all_orientations
 
 
 def _det(text: str, box: tuple[float, float, float, float], conf: float) -> Detection:
@@ -105,3 +107,71 @@ def test_a_low_confidence_long_candidate_still_loses_to_a_good_short_fragment():
     ]
     kept = _merge(candidates, iou_threshold=0.3, containment_threshold=0.6)
     assert [d.text for d in kept] == ["2"]
+
+
+class _FirstPassOnlyBackend:
+    """Returns ``first_pass`` detections only on the very first call
+    (the un-rotated, angle=0 pass) and nothing on the other two — good
+    enough for a test that only cares what detect_all_orientations does
+    with one pass's raw output, not full multi-pass behaviour."""
+
+    def __init__(self, first_pass: list[Detection]) -> None:
+        self._first_pass = first_pass
+        self._calls = 0
+
+    def detect_and_recognise(self, image: np.ndarray) -> list[Detection]:
+        self._calls += 1
+        return self._first_pass if self._calls == 1 else []
+
+
+def test_a_zero_area_degenerate_quad_never_reaches_nms():
+    """Regression: _area, _iou and _containment all short-circuit to
+    0.0 whenever either input box has no area — there's no "smaller" or
+    "union" to measure — so a hairline-scratch/hallucinated-sliver
+    detection with a truly zero-width or zero-height quad was INVISIBLE
+    to every overlap check _merge relies on and survived unconditionally,
+    however completely it sat on top of a real, legitimate detection —
+    the opposite of what NMS is for. Filtered out before it can ever
+    become a candidate at all, upstream of _merge entirely.
+    """
+    image = np.full((200, 300, 3), 255, np.uint8)
+    degenerate = Detection(
+        text="l", quad=((10.0, 10.0), (10.0, 10.0), (10.0, 40.0), (10.0, 40.0)), conf=0.9
+    )
+    real = Detection(
+        text="Stue", quad=((0.0, 0.0), (60.0, 0.0), (60.0, 30.0), (0.0, 30.0)), conf=0.99
+    )
+    backend = _FirstPassOnlyBackend([degenerate, real])
+
+    detections = detect_all_orientations(image, backend)
+    texts = [d.text for d in detections]
+    assert "l" not in texts
+    assert "Stue" in texts
+
+
+def test_an_orientation_implausible_reject_is_routed_into_dropped_out():
+    """Regression: an _orientation_is_plausible rejection used to vanish
+    silently — never passed to dropped_out, so raster/pipeline.py's own
+    coverage-check safety net (_find_likely_missed_text) could never see
+    it. Fine for the common case (a redundant re-read of text another
+    pass already got right, still covered by the real kept detection),
+    but a real loss for a short, genuinely-horizontal lexicon word (e.g.
+    'WC') whose tight bbox happens to read very slightly taller than
+    wide — ordinary detector padding noise, not a real orientation
+    problem — on every pass. Confirmed via detect_all_orientations
+    itself, not the plausibility check in isolation: a rejected
+    candidate must actually reach ``dropped_out`` for the safety net to
+    have any chance of catching it.
+    """
+    image = np.full((200, 300, 3), 255, np.uint8)
+    # Pass angle 0 (claims horizontal); box taller than wide -> rejected
+    # by _orientation_is_plausible's own shape check.
+    implausible = Detection(
+        text="WC", quad=((10.0, 10.0), (30.0, 10.0), (30.0, 40.0), (10.0, 40.0)), conf=0.95
+    )
+    backend = _FirstPassOnlyBackend([implausible])
+
+    dropped: list[Detection] = []
+    detections = detect_all_orientations(image, backend, dropped_out=dropped)
+    assert detections == []
+    assert [d.text for d in dropped] == ["WC"]

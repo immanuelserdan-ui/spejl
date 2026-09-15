@@ -111,9 +111,23 @@ def render_run(
 
     if target_size is not None:
         target_along = max(1.0, target_size[0])
+        target_across = max(1.0, target_size[1])
         for _attempt in range(6):
             along = tile.width / SUPERSAMPLE
-            if along <= target_along * OVERFLOW_TOLERANCE:
+            across = tile.height / SUPERSAMPLE
+            # Both dimensions must fit, not just width: the module's own
+            # header promises "a run can therefore never grow into a
+            # wall" without singling out an axis, but only `along` was
+            # ever checked here — a font substitution with taller
+            # ascent+descent than the original detected box (a
+            # different font, or glyphs with descenders the original
+            # crop didn't have) could overflow vertically with `shrunk`
+            # staying False and no shrink ever attempted, silently
+            # breaking that promise on the axis nobody was checking.
+            if (
+                along <= target_along * OVERFLOW_TOLERANCE
+                and across <= target_across * OVERFLOW_TOLERANCE
+            ):
                 break
             shrunk = True
             # Tracking is the cheaper knob — reducing it preserves the
@@ -133,6 +147,21 @@ def render_run(
     final_h = max(1, int(round(tile.height / SUPERSAMPLE)))
     tile = tile.resize((final_w, final_h), Image.LANCZOS)
 
+    # Captured HERE, before rotation — these are the (along, across)
+    # dimensions in the glyph's own frame, the same frame `target_size`
+    # is measured in. A rotated rectangle's axis-aligned bounding box
+    # (PIL's `expand=True`) is strictly larger than the rectangle itself
+    # on both axes for any non-cardinal angle, so measuring ink extent
+    # AFTER rotation and comparing it against a pre-rotation target
+    # inflates the apparent size purely from rotation geometry — most
+    # visible on the narrow "across" axis of a long, thin, gently-tilted
+    # dimension number: a few degrees of tilt add only a modest fraction
+    # to the long "along" axis but a LARGE fraction to the short one
+    # (confirmed on real tilted dimension numbers: 120-250% "overflow"
+    # reported on height alone, for runs whose actual glyph tile fit
+    # its target cleanly and never even attempted a shrink).
+    ink_width, ink_height = float(final_w), float(final_h)
+
     if abs(angle_deg) > 1e-6:
         # PIL rotates counter-clockwise in a y-down image, which matches
         # Spejl's angle convention (90° = reads bottom-to-top).
@@ -143,8 +172,8 @@ def render_run(
         shrunk=shrunk,
         final_px_size=px_size,
         final_tracking=tracking,
-        ink_width=float(tile.width),
-        ink_height=float(tile.height),
+        ink_width=ink_width,
+        ink_height=ink_height,
         collided=collided,
     )
 

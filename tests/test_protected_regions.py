@@ -85,6 +85,42 @@ def test_replace_unmirrored_clips_a_patch_that_only_partly_fits():
     # is secondary to "doesn't corrupt or crash."
 
 
+def test_replace_unmirrored_stays_correctly_registered_when_the_source_edge_clips_it():
+    """Regression: when the region itself extends past the SOURCE's own
+    edge (not just the destination canvas's edge), a pixel nowhere near
+    either edge of the resulting (already-clamped) patch used to land
+    off its correct mirrored position by the full clamp amount — a
+    silent mis-registration, not a crash, so nothing caught it before.
+    Confirmed directly: a marker at region-relative offset 40, on a
+    region overflowing the source's left edge by 5px, landed 5px off
+    from its correct destination.
+
+    The patch is placed UNFLIPPED, so a pixel's destination must be the
+    mirrored NOMINAL region's own start plus that pixel's offset from
+    the NOMINAL region's own start — not "the mirrored box's start,
+    unshifted" (silently drops the source-edge clamp amount) and not
+    "re-mirror the already-clamped patch's own box" either (the clamp
+    amount is invisible to a box that has already been clamped, so
+    re-mirroring it can't recover it).
+    """
+    w, h = 1000, 200
+    source = _canvas(w, h, fill=255)
+    source[120, 40] = (10, 20, 30)  # a distinctive marker, well inside the region
+    canvas = _canvas(w, h, fill=255)
+
+    # Region nominally spans x in [-5, 50) -- extends 5px past the
+    # source's own left edge, clamped on read to x in [0, 50).
+    _replace_unmirrored(canvas, source, (-5, 100, 50, 150), w=w, h=h, axis=Axis.VERTICAL)
+
+    # Mirrored NOMINAL region starts at x'=950 (w - 50). The marker sits
+    # at region-relative offset 45 (source x=40 minus the nominal x0 of
+    # -5) from that start, preserved unflipped: 950 + 45 = 995.
+    assert tuple(int(c) for c in canvas[120, 995]) == (10, 20, 30)
+    # And the patch's own very first column (source x=0, offset 5 from
+    # the nominal start) must land exactly at 950 + 5 = 955 -- not 950.
+    assert canvas[120, 954].tolist() == [255, 255, 255]  # untouched, one before the true start
+
+
 class _FixedBackend:
     """An OcrBackend stand-in that reports fixed detections, scaled to
     whatever size image it's actually given, so the upscale/rescale

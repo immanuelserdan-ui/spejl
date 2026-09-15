@@ -192,7 +192,22 @@ def snap(raw: str, *, min_score: float = 82.0, conf: float = 1.0) -> SnapResult:
         corrected = fold_matches[0] + sep + tail
         return SnapResult(corrected, raw, "room", corrected != text, 1.0)
 
-    # Tier 3 — genuine fuzzy match, for OCR damage beyond diacritics.
+    # Tier 3 — a curated abbreviation ("Kok" -> "Køkken", "Bad/Toilet" ->
+    # "Bad/WC"). Checked BEFORE fuzzy matching, not after: an entry here
+    # is a deliberate, exact correction someone curated for a known OCR
+    # pattern, strictly more certain than a similarity score — and
+    # regression-confirmed to matter, not just in principle. 'Bad/Toilet'
+    # folds to 'bad/toilet', which Tier 4's fuzzy match below also scores
+    # at 90 against plain 'Bad' (comfortably over min_score) — checked in
+    # the other order, that fuzzy hit returns first and this curated
+    # entry, and the distinction between a bathroom and a combined
+    # bath/WC room it exists to preserve, is silently unreachable.
+    lowered = _fold(head)
+    if lowered in abbrev:
+        corrected = abbrev[lowered] + sep + tail
+        return SnapResult(corrected, raw, "room", corrected != text, 0.9)
+
+    # Tier 4 — genuine fuzzy match, for OCR damage beyond diacritics.
     # See _MIN_FUZZY_HEAD_LEN's own comment: a head this short is too
     # little evidence for a similarity score to mean anything, no matter
     # how high it comes back.
@@ -212,11 +227,6 @@ def snap(raw: str, *, min_score: float = 82.0, conf: float = 1.0) -> SnapResult:
                 changed=corrected != text,
                 confidence=score / 100.0,
             )
-
-    lowered = _fold(head)
-    if lowered in abbrev:
-        corrected = abbrev[lowered] + sep + tail
-        return SnapResult(corrected, raw, "room", corrected != text, 0.9)
 
     # Last resort, and deliberately last: only once nothing else — exact,
     # fold, fuzzy, or abbreviation — accounts for this string at all does

@@ -344,7 +344,7 @@ def mirror_raster(
     lines = linework_mask_for(flipped, flipped_text_mask)
     for run in runs:
         run_target_size = _target_size(run)
-        target_along = run_target_size[0]
+        target_along, target_across = run_target_size
         rendered = render_run(
             canvas=flipped,
             text=run.text,
@@ -362,13 +362,21 @@ def mirror_raster(
             # A silent "fit-shrunk" info flag looked identical whether
             # the loop converged to a 1% overshoot or gave up at 25% —
             # the second case is worth a human's attention, the first
-            # is not, so the flag now says which one happened.
-            overflow = rendered.ink_width / max(1.0, target_along)
+            # is not, so the flag now says which one happened. Checked
+            # on whichever axis overflows worse, not just width: the
+            # loop this mirrors (render/text.py) now gives up on either
+            # axis, so a run still oversized only vertically (a taller
+            # font substitution, say) must be caught here too, not just
+            # the width axis this flag originally shipped with.
+            width_overflow = rendered.ink_width / max(1.0, target_along)
+            height_overflow = rendered.ink_height / max(1.0, target_across)
+            overflow = max(width_overflow, height_overflow)
             if overflow > 1.15:
+                axis_word = "width" if width_overflow >= height_overflow else "height"
                 run.flags.append(
                     Flag(
                         "fit-shrink-incomplete",
-                        f"{run.text!r} is still {overflow:.0%} of its original width "
+                        f"{run.text!r} is still {overflow:.0%} of its original {axis_word} "
                         "after the shrink-to-fit limit — may overlap neighbouring content.",
                         "warn",
                     )
@@ -594,25 +602,43 @@ def _replace_unmirrored(
     clipping to it, so an unclamped ``canvas[dy0:dy1, -50:-20]`` silently
     pastes the patch near the opposite edge of the image instead of
     raising or clipping — corruption with no exception and no flag.
+
+    A region that overflows the SOURCE's own edge (not just the
+    destination's) needs one more thing: the patch is placed UNFLIPPED
+    — its own internal pixel order is never reversed, only the block's
+    overall position moves to the mirrored side — so a pixel's
+    destination is the mirrored NOMINAL region's own start plus that
+    pixel's offset from the NOMINAL region's own start, not simply "the
+    mirrored box's start, unshifted" (which silently drops however much
+    was trimmed off the source's leading edge and mis-registers the
+    whole block by exactly that amount — confirmed: a 5px source-edge
+    clamp reproducibly shifted content nowhere near either edge of the
+    patch itself by that same 5px on the canvas) and not "re-mirror the
+    already-clamped patch's own box" either (loses the same information
+    a different way — the clamp amount is invisible to a box that has
+    already been clamped).
     """
-    sx0, sy0, sx1, sy1 = (int(round(v)) for v in region)
-    sx0, sy0 = max(0, sx0), max(0, sy0)
-    sx1, sy1 = min(source.shape[1], sx1), min(source.shape[0], sy1)
+    rx0, ry0, rx1, ry1 = (int(round(v)) for v in region)
+    sx0, sy0 = max(0, rx0), max(0, ry0)
+    sx1, sy1 = min(source.shape[1], rx1), min(source.shape[0], ry1)
     if sx1 <= sx0 or sy1 <= sy0:
         return
     patch = source[sy0:sy1, sx0:sx1]
 
-    dx0, dy0, dx1, dy1 = (int(round(v)) for v in M.mirror_bbox(region, w, h, axis))
+    dx0, dy0, _dx1, _dy1 = (int(round(v)) for v in M.mirror_bbox(region, w, h, axis))
+    dest_x0, dest_x1 = dx0 + (sx0 - rx0), dx0 + (sx1 - rx0)
+    dest_y0, dest_y1 = dy0 + (sy0 - ry0), dy0 + (sy1 - ry0)
+
     # Clip the destination to the canvas FIRST, then shrink the patch by
     # exactly what was clipped off each side — this is what keeps a
     # region that runs off one edge from wrapping onto the other.
-    clip_left = max(0, -dx0)
-    clip_top = max(0, -dy0)
-    cdx0, cdy0 = max(0, dx0), max(0, dy0)
-    cdx1 = min(canvas.shape[1], dx0 + patch.shape[1])
-    cdy1 = min(canvas.shape[0], dy0 + patch.shape[0])
+    cdx0, cdy0 = max(0, dest_x0), max(0, dest_y0)
+    cdx1 = min(canvas.shape[1], dest_x1)
+    cdy1 = min(canvas.shape[0], dest_y1)
     if cdx1 <= cdx0 or cdy1 <= cdy0:
         return
+    clip_left = cdx0 - dest_x0
+    clip_top = cdy0 - dest_y0
     canvas[cdy0:cdy1, cdx0:cdx1] = patch[
         clip_top : clip_top + (cdy1 - cdy0), clip_left : clip_left + (cdx1 - cdx0)
     ]

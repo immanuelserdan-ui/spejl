@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from spejl.detect.ocr import Detection
 from spejl.detect.rotations import (
+    _nearest_cardinal_and_deviation,
     _orientation_is_plausible,
     _quad_angle_deg,
     _resolve_ambiguous_tilts,
@@ -171,3 +172,47 @@ def test_plausibility_is_checked_against_the_pass_angle_not_the_refined_one():
     # The genuine vertical dimension from the same sheet must still pass.
     genuine = Detection(text="4504", quad=_QUAD_4504, conf=1.0, angle_deg=90.0)
     assert _orientation_is_plausible(genuine)
+
+
+def test_a_malformed_quad_falls_back_instead_of_crashing():
+    """Regression: _quad_angle_deg unconditionally destructured its
+    ``quad`` argument into exactly 4 points. Detection.quad is built
+    directly from whatever the OCR backend returns, with no length
+    check anywhere upstream -- nothing actually guarantees 4 points,
+    even though RapidOCR always emits them in practice. A malformed
+    quad (however it might arise -- a detector glitch, a future
+    backend swap) must degrade gracefully for that one run, not raise
+    ValueError and take down detection for the WHOLE page.
+    """
+    assert _quad_angle_deg(((0.0, 0.0), (1.0, 0.0), (1.0, 1.0)), fallback=42.0) == 42.0
+    assert _quad_angle_deg((), fallback=-7.0) == -7.0
+
+
+def test_cardinal_identity_is_consistent_across_the_180_wraparound_seam():
+    """Regression: -180deg and +180deg are the same physical direction,
+    but they're two distinct floats in the cardinal list -- without
+    wrapping, an angle just past one side of that seam and one just
+    past the other come back tagged with DIFFERENT cardinals even when
+    genuinely close together, so corroboration between them could
+    never succeed no matter how tightly they agree. 179.5 and -179.5
+    are only 1.0 degree apart in reality (right at the corroboration
+    tolerance) but resolved to cardinal=180.0 and cardinal=-180.0
+    respectively before this fix.
+    """
+    cardinal_a, dev_a = _nearest_cardinal_and_deviation(179.5)
+    cardinal_b, dev_b = _nearest_cardinal_and_deviation(-179.5)
+    assert cardinal_a == cardinal_b
+    assert abs(dev_a - dev_b) <= 1.0
+
+
+def test_corroboration_works_across_the_180_wraparound_seam():
+    """End-to-end version of the cardinal-identity fix above, through
+    _resolve_ambiguous_tilts: two genuine near-180-degree tilts that
+    straddle the wraparound seam must still corroborate each other,
+    the same as any other pair of independent detections agreeing on
+    the same real tilt.
+    """
+    run_a = _det("run_a", 179.5)
+    run_b = _det("run_b", -179.5)
+    resolved = _resolve_ambiguous_tilts([run_a, run_b])
+    assert [d.angle_deg for d in resolved] == [179.5, -179.5]

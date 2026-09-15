@@ -193,6 +193,21 @@ def test_vr_period_abbreviation_is_a_curated_lexicon_entry():
     assert result.kind == "room"
 
 
+def test_curated_abbreviation_outranks_a_fuzzy_match_to_a_shorter_word():
+    """Regression: 'Bad/Toilet' (folds to 'bad/toilet') scores 90 against
+    plain 'Bad' under Tier 3/4 fuzzy matching — comfortably over
+    min_score — so when the curated abbreviation lookup ran AFTER fuzzy
+    matching, this exact entry in da_dk.json's own abbreviations dict
+    ('Bad/Toilet' -> 'Bad/WC') was unreachable dead code: fuzzy always
+    won first and silently downgraded a combined bath/WC room to a plain
+    bathroom. An exact, curated correction is strictly more certain than
+    a similarity score and must be checked first.
+    """
+    result = snap("Bad/Toilet")
+    assert result.text == "Bad/WC"
+    assert result.kind == "room"
+
+
 @pytest.mark.parametrize(
     ("raw", "would_have_matched"),
     [

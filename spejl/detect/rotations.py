@@ -139,6 +139,16 @@ def _quad_angle_deg(quad: tuple[tuple[float, float], ...], fallback: float) -> f
     convention, matching :func:`_canonicalise_vertical`) if more
     vertical than horizontal.
     """
+    if len(quad) != 4:
+        # RapidOCR always emits a 4-point polygon in practice, but
+        # nothing upstream actually guarantees it — Detection.quad is
+        # built directly from whatever the backend returns, with no
+        # length check anywhere in the chain. Unconditionally
+        # destructuring into exactly 4 points would raise ValueError and
+        # take down the WHOLE page's detection for one malformed
+        # candidate, rather than degrading gracefully for that one run
+        # the way every other geometry guard in this module does.
+        return fallback
     (x0, y0), (x1, y1), _, (x3, y3) = quad
     top_dx, top_dy = x1 - x0, y1 - y0
     left_dx, left_dy = x3 - x0, y3 - y0
@@ -249,13 +259,24 @@ def detect_all_orientations(
 ) -> list[Detection]:
     """Run every rotation pass and merge into one set of source-space runs.
 
-    ``dropped_out``, if given, is passed straight through to
-    :func:`_merge` — see its own docstring for what ends up in it and
-    why. Not populated with anything :func:`_orientation_is_plausible`
-    rejects before ``_merge`` ever sees it: that filter exists to catch
+    ``dropped_out``, if given, collects both what :func:`_merge` drops
+    (see its own docstring) AND what :func:`_orientation_is_plausible`
+    rejects before ``_merge`` ever sees it. That filter exists to catch
     a rotated pass re-reading text that's ALREADY correctly read in its
-    own proper-angle pass (a false orientation claim, not lost content),
-    a different kind of noise than a genuine drop inside ``_merge``.
+    own proper-angle pass (a false orientation claim, not lost content)
+    — usually true, but not guaranteed: a short, genuinely-horizontal
+    lexicon word ("WC") is exempt from the aspect-ratio check only
+    below 2 characters, so a 2-character word whose tight bbox comes
+    back very slightly taller than wide (ordinary detector padding
+    noise, not a real orientation problem) can be rejected on EVERY
+    pass, not just the redundant ones — a genuine loss this filter's
+    own design didn't originally account for. Routing rejections
+    through the same coverage check :func:`_merge`'s own drops already
+    get costs nothing for the common, intended case (a redundant reject
+    is still substantially covered by the real, correctly-kept
+    detection of the same text, so the coverage check stays silent) and
+    catches the rare real one instead of accepting it as an unlogged
+    loss.
 
     Each surviving candidate's angle is then refined by
     :func:`_quad_angle_deg` — the detection's own quad geometry — in
@@ -294,11 +315,25 @@ def detect_all_orientations(
                 _unrotate_point(px, py, src_w, src_h, rotate_code) for px, py in det.quad
             )
             candidate = Detection(text=det.text, quad=quad, conf=det.conf, angle_deg=angle)
+            if _area(candidate.bbox) <= 0:
+                # A zero-width or zero-height box — a hairline scratch or
+                # hallucinated sliver, not real text — is invisible to
+                # every downstream overlap check: _iou and _containment
+                # both short-circuit to 0.0 whenever either input box has
+                # no area (there's no "smaller" or "union" to measure), so
+                # a candidate like this is unconditionally KEPT by _merge
+                # regardless of how completely it sits on top of a real,
+                # legitimate detection — the opposite of what NMS is for.
+                # Cheapest fix is upstream of that machinery entirely:
+                # never let a degenerate box become a candidate at all.
+                continue
             if _orientation_is_plausible(candidate):
                 resolved_angle = _quad_angle_deg(quad, fallback=angle)
                 candidates.append(
                     Detection(text=det.text, quad=quad, conf=det.conf, angle_deg=resolved_angle)
                 )
+            elif dropped_out is not None:
+                dropped_out.append(candidate)
 
     merged = _merge(candidates, iou_threshold, dropped_out=dropped_out)
     canonicalised = [_canonicalise_vertical(d) for d in merged]
@@ -307,10 +342,26 @@ def detect_all_orientations(
 
 def _nearest_cardinal_and_deviation(angle_deg: float) -> tuple[float, float]:
     """The closest cardinal (0/90/-90/180) to ``angle_deg`` and the
-    SIGNED deviation (``angle_deg - cardinal``) from it."""
+    SIGNED deviation from it, wrapped to (-180, 180].
+
+    -180° and +180° are the same physical direction, but they're two
+    distinct floats in the cardinal list below — without the wrap, an
+    angle just past one side of that seam (e.g. 179.5°, nearest
+    cardinal +180) and one just past the other (-179.5°, nearest
+    cardinal -180) are only 1.0° apart in reality but come back
+    tagged with DIFFERENT cardinals, so _resolve_ambiguous_tilts'
+    ``cardinal_i == cardinal_j`` check can never corroborate them —
+    the exact "two genuinely tilted runs can't corroborate across the
+    wraparound seam" gap this wrap closes. Wrapping every deviation
+    into the same (-180, 180] range makes the ``dev`` computed against
+    EITHER cardinal identical for the same angle, so the earlier
+    cardinal in iteration order (-180.0) always wins ties — every
+    angle near the seam ends up tagged with the SAME cardinal, however
+    it happened to round, and deviations become directly comparable.
+    """
     best_cardinal, best_dev = 0.0, angle_deg
     for cardinal in (-180.0, -90.0, 0.0, 90.0, 180.0):
-        dev = angle_deg - cardinal
+        dev = ((angle_deg - cardinal) + 180.0) % 360.0 - 180.0
         if abs(dev) < abs(best_dev):
             best_cardinal, best_dev = cardinal, dev
     return best_cardinal, best_dev
