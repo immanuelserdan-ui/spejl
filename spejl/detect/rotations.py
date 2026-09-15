@@ -16,10 +16,13 @@ rotating the image clockwise maps an original direction (dx, dy) to
 
 from __future__ import annotations
 
+import math
+
 import cv2
 import numpy as np
 
 from spejl.detect.ocr import Detection, OcrBackend
+from spejl.transform import mirror as M
 
 # Rotation passes: (cv2 rotate code, the source-space angle it reveals)
 _PASSES = (
@@ -27,6 +30,102 @@ _PASSES = (
     (cv2.ROTATE_90_CLOCKWISE, 90.0),
     (cv2.ROTATE_90_COUNTERCLOCKWISE, -90.0),
 )
+
+# Below this quad elongation (along-edge / cross-edge), the detection is
+# too close to square for its own tilt to mean anything — a 2-character
+# annotation like 'H*' can read its quad angle as several degrees off
+# true (confirmed on a real plan: -9.3°) purely from how little geometry
+# there is to anchor an angle estimate, not because it is actually
+# drawn crooked. Every genuinely tilted dimension number on that same
+# plan (4+ digits, following a diagonal wall) measured 1.9-2.4 —
+# comfortably clear of this floor — while 'H*' measured 1.25.
+_MIN_ASPECT_FOR_QUAD_ANGLE = 1.5
+
+# A quad angle within this many degrees of a cardinal (0/90/-90/180) is
+# snapped to it outright, rather than kept as a suspiciously precise-
+# looking 1.2° or 2.2°: real architectural text is drawn EXACTLY
+# horizontal or vertical unless it deliberately follows a sloped wall,
+# and a sloped wall's own tilt is a real, physical, consistent angle,
+# not a fraction of a degree. Confirmed on a real plan: every genuinely
+# axis-aligned multi-character label measured under 2.5° of drift
+# (ordinary detection noise), while every label actually following a
+# diagonal wall measured 5-9° — both clusters found on the SAME sheet,
+# nowhere close enough to each other to risk one threshold confusing
+# them.
+_CANONICAL_SNAP_DEG = 3.0
+
+
+def _quad_angle_deg(quad: tuple[tuple[float, float], ...], fallback: float) -> float:
+    """The run's true reading-direction angle, read directly from its
+    own detected quad, in Spejl's angle convention.
+
+    RapidOCR's detector is not limited to axis-aligned boxes — it
+    already reports where a run's own four corners actually sit, tilt
+    included, regardless of which of the three rotation passes found
+    it (confirmed on a real plan: a single UN-rotated pass alone
+    reported a -4.9° tilt for a dimension number running along a
+    diagonal wall). The triple-pass rotation exists to get a confident
+    READ of hard-to-recognise vertical text, not to discover its
+    geometry — the geometry was sitting in the quad the whole time.
+    Snapping every candidate to whichever of 0°/90°/-90° its pass
+    corresponds to, as this function replaces, discards that and
+    forces a genuinely diagonal run into an axis-aligned bounding box
+    well over twice its actual footprint — the direct cause of a real,
+    user-reported bug: several dimension numbers following a sloped
+    partition wall measured wildly oversized and rendered broken.
+
+    Two guards keep this from trusting geometry that doesn't deserve
+    it (see the two module constants' own comments for the real
+    numbers behind each):
+
+    * Below ``_MIN_ASPECT_FOR_QUAD_ANGLE`` elongation, the quad is too
+      close to square for an angle to mean anything — falls back to
+      ``fallback`` (the detecting pass's own canonical angle).
+    * Within ``_CANONICAL_SNAP_DEG`` of a cardinal, snapped to it
+      outright — ordinary detection noise around a genuinely
+      axis-aligned run, not a real fractional-degree tilt.
+
+    The direction along the long edge is resolved with an
+    axis-DOMINANT reading convention, deliberately NOT
+    :func:`transform.mirror.is_canonical_direction`: that helper
+    always defers to the horizontal component's sign whenever it is
+    non-zero, which is right for mirroring an ALREADY-canonical
+    direction (there, non-zero horizontal only ever shows up on
+    genuinely horizontal text) but wrong here — a mostly-vertical raw
+    edge from a tilted quad has a small but very much non-zero
+    horizontal component purely from the tilt, and that component's
+    sign is essentially arbitrary (an artefact of which corner the
+    detector happened to label first), not a signal about reading
+    direction. So: whichever axis actually dominates this direction
+    decides which convention applies — left-to-right if the edge is
+    more horizontal than vertical, bottom-to-top (ISO dimension-text
+    convention, matching :func:`_canonicalise_vertical`) if more
+    vertical than horizontal.
+    """
+    (x0, y0), (x1, y1), _, (x3, y3) = quad
+    top_dx, top_dy = x1 - x0, y1 - y0
+    left_dx, left_dy = x3 - x0, y3 - y0
+    top_len = math.hypot(top_dx, top_dy)
+    left_len = math.hypot(left_dx, left_dy)
+    if top_len >= left_len:
+        dx, dy, along, across = top_dx, top_dy, top_len, left_len
+    else:
+        dx, dy, along, across = left_dx, left_dy, left_len, top_len
+
+    if along / max(1.0, across) < _MIN_ASPECT_FOR_QUAD_ANGLE:
+        return fallback
+
+    if abs(dx) >= abs(dy):
+        if dx < 0:  # more horizontal than vertical: canonical is left-to-right
+            dx, dy = -dx, -dy
+    elif dy > 0:  # more vertical than horizontal: canonical is bottom-to-top (y-down coords)
+        dx, dy = -dx, -dy
+    angle = M.angle_from_direction(dx, dy)
+
+    for cardinal in (-180.0, -90.0, 0.0, 90.0, 180.0):
+        if abs(angle - cardinal) < _CANONICAL_SNAP_DEG:
+            return cardinal
+    return angle
 
 
 def _unrotate_point(
@@ -120,6 +219,29 @@ def detect_all_orientations(
     a rotated pass re-reading text that's ALREADY correctly read in its
     own proper-angle pass (a false orientation claim, not lost content),
     a different kind of noise than a genuine drop inside ``_merge``.
+
+    Each surviving candidate's angle is then refined by
+    :func:`_quad_angle_deg` — the detection's own quad geometry — in
+    place of the pass's fixed 0°/90°/-90°; see that function's own
+    docstring for why the pass angle alone used to force genuinely
+    diagonal text (a dimension number following a sloped wall) into an
+    axis-aligned box more than twice its real size.
+
+    That refinement happens AFTER :func:`_orientation_is_plausible`,
+    deliberately, not before: plausibility still checks the PASS's own
+    canonical angle against the box shape, exactly as it always has.
+    Confirmed as load-bearing on a real plan, not just cautious
+    layering: a 90°-rotated pass misread 'Vær. 2' as the truncated
+    'Vær.' (missing its '2', at HIGHER confidence than the correct
+    full read) with a box far wider than tall — that mismatch against
+    the pass's forced 90° claim is exactly what plausibility is built
+    to catch, and it does, filtering the truncated read out before it
+    can ever compete in the merge below. Computing the quad's own
+    angle first and checking THAT against the box instead would remove
+    this protection: the truncated read's own geometry genuinely IS
+    near-horizontal, so it would pass a shape check against ITS OWN
+    angle even though it is still a truncated, worse read of the same
+    text a different pass got right in full.
     """
     src_h, src_w = image.shape[:2]
     candidates: list[Detection] = []
@@ -132,7 +254,10 @@ def detect_all_orientations(
             )
             candidate = Detection(text=det.text, quad=quad, conf=det.conf, angle_deg=angle)
             if _orientation_is_plausible(candidate):
-                candidates.append(candidate)
+                resolved_angle = _quad_angle_deg(quad, fallback=angle)
+                candidates.append(
+                    Detection(text=det.text, quad=quad, conf=det.conf, angle_deg=resolved_angle)
+                )
 
     merged = _merge(candidates, iou_threshold, dropped_out=dropped_out)
     return [_canonicalise_vertical(d) for d in merged]
