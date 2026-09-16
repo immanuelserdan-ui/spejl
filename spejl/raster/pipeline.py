@@ -1,7 +1,7 @@
-"""Route B — the raster pipeline, S1 through S7.
+"""Route B — the raster pipeline, S1 through S8.
 
     detect (S2) -> snap (S3) -> style (S4) -> erase+repair (S5)
-      -> flip (S6) -> mirror anchors -> re-render (S7)
+      -> flip (S6) -> mirror anchors -> re-render (S7) -> QA gate (S8)
 
 The load-bearing property, and the reason the stages are in this order:
 text attributes are extracted *before* the flip and applied *after* it,
@@ -14,6 +14,13 @@ kinds of content are not equally recoverable — a run can be redrawn
 from its string and measured style at any time, whereas linework a
 glyph painted over is gone from the output — so where they compete for
 a pixel, the drawing wins. See render/text.py.
+
+S8, immediately before the file is written, is the one stage that does
+not trust S1-S7 to have done its own job correctly — it checks the
+FINISHED sheet's actual bytes against spatial integrity, layer
+ordering and text fidelity, corrects what it safely can, and refuses
+the save outright rather than write output any of the three are still
+wrong on. See qa/self_correct.py.
 """
 
 from __future__ import annotations
@@ -29,7 +36,8 @@ from spejl.detect.rotations import _intersection, detect_all_orientations
 from spejl.erase.clean import erase_text
 from spejl.lexicon.snap import SnapResult, snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
-from spejl.render.text import drawing_alpha_for, linework_mask_for, render_run
+from spejl.qa.self_correct import QAContext, QAGateFailure, run_qa_gate
+from spejl.render.text import RenderedRun, drawing_alpha_for, linework_mask_for, render_run
 from spejl.style.metrics import (
     TextStyle,
     fit_style,
@@ -201,6 +209,7 @@ def mirror_raster(
     axis: Axis = Axis.VERTICAL,
     backend: OcrBackend | None = None,
     protected: list[tuple[float, float, float, float]] | None = None,
+    qa_gate: bool = True,
 ) -> RasterResult:
     """Mirror a raster plan, keeping every string readable.
 
@@ -208,6 +217,15 @@ def mirror_raster(
     lifted out before the flip and composited back unmirrored at their
     mirrored anchor — a mirrored north arrow is a false statement about
     the building, so this is a correctness feature, not a nicety.
+
+    ``qa_gate`` runs the S8 pre-save check (qa/self_correct.py) before
+    ``output_path`` is written — spatial integrity, layer ordering, and
+    text fidelity, corrected where a correction is safe and refused
+    where it isn't (see that module's own docstring for exactly which
+    is which). Off switch exists for the test suite and for callers
+    doing their own gating (fixture generation, golden-fixture
+    round-trip scoring), which have their own reasons to see the raw,
+    un-gated output — not a knob a normal caller should reach for.
     """
     image = cv2.imread(str(input_path))
     if image is None:
@@ -391,8 +409,17 @@ def mirror_raster(
     # start occluding each other in page order, which is neither what
     # this layer means nor stable under a reordering of `runs`.
     drawing = drawing_alpha_for(flipped)
+    # The S8 QA gate's own reference for "what did this sheet look like
+    # before any text was drawn" — a copy, not a view: `flipped` is
+    # mutated in place by every render_run() call in the loop below, so
+    # this has to be taken now or it would just be `flipped` again by
+    # the time the gate runs.
+    plate = flipped.copy()
+    targets: list[tuple[float, float]] = []
+    rendered_runs: list[RenderedRun] = []
     for run in runs:
         run_target_size = _target_size(run)
+        targets.append(run_target_size)
         target_along, target_across = run_target_size
         rendered = render_run(
             canvas=flipped,
@@ -462,6 +489,22 @@ def mirror_raster(
                     "warn",
                 )
             )
+        rendered_runs.append(rendered)
+
+    # ---- S8: pre-save QA gate ----------------------------------------------
+    if qa_gate:
+        report = run_qa_gate(QAContext(
+            canvas=flipped, plate=plate, source=image, axis=axis,
+            runs=runs, targets=targets, rendered=rendered_runs,
+            drawing_alpha=drawing, linework_mask=lines, protected=protected,
+        ))
+        flags.extend(v.as_flag() for v in report.corrected)
+        if not report.passed:
+            # Refuse rather than save — matches REFUSE_CAP_HEIGHT_PX's own
+            # precedent above. No sidecar, no output file: a caller that
+            # wants the diagnostics anyway has them on exc.report, and the
+            # partially-rendered `flipped` array is never written to disk.
+            raise QAGateFailure(report)
 
     cv2.imwrite(str(output_path), flipped)
 

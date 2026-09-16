@@ -227,7 +227,14 @@ def test_a_run_still_oversized_after_shrinking_is_flagged_as_a_warning(tmp_path)
     )
     backend = _FixedBackend([tiny_box], base_size=(300, 400))
 
-    result = mirror_raster(src, tmp_path / "out.png", backend=backend)
+    # qa_gate=False: this box is deliberately pathological (see comment
+    # above) specifically to drive `fit-shrink-incomplete`, which this
+    # test exists to check — the S8 gate correctly refuses to SAVE a
+    # sheet this compressed (it also squishes cap height well outside
+    # the text-fidelity band), which is the right behaviour for a real
+    # mirror but would stop this test from ever reaching the flag it's
+    # actually testing.
+    result = mirror_raster(src, tmp_path / "out.png", backend=backend, qa_gate=False)
     run = next(r for r in result.runs if r.text == "Køkken")
     codes = {f.code for f in run.flags}
     assert "fit-shrink-incomplete" in codes, f"got flags: {codes}"

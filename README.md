@@ -53,6 +53,51 @@ unmirrored. Masking by absolute deviation from the ring's own reading,
 in either direction, fixes both the ordinary case and this one with a
 single test. See `tests/test_erase_clean.py`.
 
+**S8 — the pre-save QA gate.** Every stage above enforces its own piece
+of the pipeline's invariants at the point of doing the work; S8 is the
+independent check that the *finished, fully-composited* sheet actually
+satisfies them, run automatically before every save (`qa_gate=True` by
+default on `mirror_raster`). Three rules, checked against the real
+output bytes rather than assumed from upstream stages having run
+correctly:
+
+* **Spatial integrity** — every drawing pixel on the source survives,
+  mirrored, in the output. No corrector exists for this one, on
+  purpose: if geometry is missing, the one thing this stage knows about
+  what should be there is already gone from every input it has, so
+  there is nothing safe to invent — a violation here refuses the save
+  (`QAGateFailure`) rather than ship a wrong picture.
+* **Layer ordering** — every fully-solid drawing pixel still holds the
+  pre-text plate's own value. This one is cheaply self-healing: the
+  plate is authoritative geometry, so a violation is fixed by
+  restoring from it.
+* **Text fidelity** — a run's rendered cap height must land in an
+  evidence-based band of its measured target (not just under a
+  ceiling: S7's own shrink-to-fit guard has no floor, so a run can be
+  "successfully" shrunk into illegibility and never get flagged today),
+  and every character a run's corrected string needs must have a real
+  glyph in the resolved font — checked against the font's own cmap
+  table via `fontTools`, not by rendering and looking for ink (a
+  missing glyph renders as a visible fallback box with the same pixel
+  count as a real one, confirmed on a CJK and a Thai codepoint neither
+  system font on this project's dev machine actually covers). Both are
+  correctable within a few bounded, local retries — widen the target,
+  or swap to the next candidate font that covers the text.
+
+Bounded, not "loop until it passes": every correction is a
+deterministic, mechanical retry over a small fixed set of
+alternatives, so either the page settles within a couple of passes or
+the violation is structural and no amount of further looping helps —
+confirmed catching two real, previously-silent issues in the course of
+building it (a protected region's own deliberately-unflipped footprint
+misread as missing geometry; the height-lock ceiling first copying
+`OVERFLOW_TOLERANCE`, the threshold for when to START shrinking, not
+the one for when a render is actually a problem — the golden fixture's
+own `2900`/`3200` land at a legitimate 105%, no shrink ever attempted).
+Adds about 4% to end-to-end mirror time on the golden fixture — under
+40ms of the ~1.8s a full raster mirror already costs, dominated by OCR.
+See `spejl/qa/self_correct.py` and `tests/test_self_correct.py`.
+
 ```bash
 spejl mirror plan.png --axis v      # same CLI as the vector path
 ```
@@ -169,8 +214,9 @@ spejl/
 ├── style/metrics.py       measure ink/paper/size/tracking from pixels (S4)
 ├── erase/clean.py         local-paper erase + line-pixel repair (S5)
 ├── render/text.py         supersampled re-render behind the drawing layer (S7)
-├── raster/pipeline.py     wires S1–S7 together — the Route B entry point
+├── raster/pipeline.py     wires S1–S8 together — the Route B entry point
 ├── qa/
+│   ├── self_correct.py    S8: pre-save gate — check, correct, refuse (see above)
 │   ├── fixture_gen.py     golden fixture with free ground truth (vector-drawn)
 │   ├── metrics.py         recall / char accuracy / anchor error scoring
 │   └── score_ocr.py       `python -m spejl.qa.score_ocr` — the go/no-go report
