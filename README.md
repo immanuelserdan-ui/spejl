@@ -41,6 +41,18 @@ such a label reads poorly or not at all, so a run the geometry mostly
 covers is flagged `hidden-behind-linework` for review rather than
 passing quietly. See `tests/test_drawing_z_order.py`.
 
+**Reverse-out text erases correctly.** Local "paper" for the erase mask
+is read from the ring immediately outside each text box, not the box's
+own interior — the interior is exactly the one region guaranteed to
+contain the glyph, so for text knocked out lighter than its own
+background (white room-name lettering on a filled panel), the interior's
+own light end just IS the glyph. The old "darker than the light end"
+test never fired for that case: the panel got erased as "not paper" and
+the white lettering was judged paper and left standing whole and
+unmirrored. Masking by absolute deviation from the ring's own reading,
+in either direction, fixes both the ordinary case and this one with a
+single test. See `tests/test_erase_clean.py`.
+
 ```bash
 spejl mirror plan.png --axis v      # same CLI as the vector path
 ```

@@ -269,3 +269,87 @@ def test_a_repair_does_not_paint_the_old_glyph_back_onto_the_line_it_crossed():
 
     wall = cv2.cvtColor(result.image[74:86, 92:108], cv2.COLOR_BGR2GRAY)
     assert wall.max() == 0, f"the grey mark survived the erase at {wall.max()}, back on the wall"
+
+
+# ---------------------------------------------------------------------------
+# Reverse-out text: ink lighter than its own background
+# ---------------------------------------------------------------------------
+
+
+def test_reverse_out_text_is_actually_erased_not_left_standing():
+    """Regression: build_text_mask used to read 'local paper' from the
+    BOX'S OWN light end — a percentile of its own interior. That works
+    when the glyph is the box's darkest content, which is ordinary type,
+    but inverts completely for reverse-out text (white lettering knocked
+    out of a filled panel, e.g. a room name on a shaded background): the
+    interior's light end IS the glyph, so 'darker than the light end'
+    never once fired. The panel got erased as 'not paper' and the white
+    lettering was judged paper and left untouched — confirmed surviving
+    whole, unmirrored, sitting exactly where it always was, on a
+    synthetic reverse-out label.
+
+    The fix reads local paper from the RING outside the box, which has
+    no such ambiguity, and masks by absolute deviation from it in either
+    direction. Checked here at the level that actually matters: after
+    erase_text, no run of white pixels big enough to still read as a
+    letter may survive inside the panel.
+    """
+    img = np.full((160, 300, 3), 255, np.uint8)
+    cv2.rectangle(img, (40, 30), (260, 130), (0, 0, 0), -1)  # a dark panel
+    cv2.putText(img, "BAD", (70, 95), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+               (255, 255, 255), 2, cv2.LINE_AA)               # reverse-out label
+    box = (65.0, 60.0, 200.0, 105.0)
+
+    result = erase_text(img, [box])
+
+    panel = cv2.cvtColor(result.image[35:125, 45:255], cv2.COLOR_BGR2GRAY)
+    survivors = int(np.count_nonzero(panel > 200))
+    # Before the fix, this was 813 white pixels — the whole word, fully
+    # legible. A modest antialiased fringe (a known, documented, and far
+    # less severe residual — see _restore_line_pixels) is not what this
+    # test is guarding against; a run anywhere near "still a readable
+    # word" is.
+    assert survivors < 250, f"{survivors} white pixels survived — the label reads as text, not a fringe"
+
+
+def test_reverse_out_masks_exactly_the_glyph_not_the_panel_around_it():
+    """The other side of the same fix: the panel itself — real, correct
+    material — must not be swept up as "not paper" just because it is
+    dark and the glyph inside it is light. build_text_mask's job is
+    still to flag the glyph ALONE.
+    """
+    img = np.full((160, 300, 3), 255, np.uint8)
+    cv2.rectangle(img, (40, 30), (260, 130), (0, 0, 0), -1)
+    cv2.putText(img, "BAD", (70, 95), cv2.FONT_HERSHEY_SIMPLEX, 1.2,
+               (255, 255, 255), 2, cv2.LINE_AA)
+    box = (65.0, 60.0, 200.0, 105.0)
+
+    mask = build_text_mask(img, [box])
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+    # Every pixel the mask flags for erase, within the box, must be part
+    # of the glyph or its own antialiased fringe — never TRUE panel ink
+    # (near-pure black, well below the fringe's own gradient) misread as
+    # ink. <10 rather than a looser cut: the glyph's own antialiasing
+    # legitimately spans a wide grey ramp up from true black (confirmed
+    # values 16-49 flagged here, all fringe, none of it a bug) — this
+    # test is about the panel's own solid interior, not that ramp.
+    x0, y0, x1, y1 = (int(v) for v in box)
+    flagged = mask[y0:y1, x0:x1] > 0
+    panel_pixels_flagged = int(np.count_nonzero(flagged & (gray[y0:y1, x0:x1] < 10)))
+    assert panel_pixels_flagged == 0, "the panel's own solid ink was flagged for erase, not just the glyph"
+
+
+def test_ordinary_dark_on_light_text_is_unaffected_by_the_ring_based_paper():
+    """The common case this change touches the machinery of but must not
+    change the outcome of: plain dark type on a plain light sheet, no
+    panel in sight, must erase exactly as before."""
+    img = np.full((100, 200, 3), 255, np.uint8)
+    cv2.putText(img, "Bad", (30, 60), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (0, 0, 0), 2, cv2.LINE_AA)
+    box = (25.0, 30.0, 110.0, 70.0)
+
+    result = erase_text(img, [box])
+
+    x0, y0, x1, y1 = (int(v) for v in box)
+    region = cv2.cvtColor(result.image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+    assert region.min() >= 240, "ordinary dark-on-light text was not fully erased"

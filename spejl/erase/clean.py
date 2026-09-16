@@ -45,12 +45,15 @@ def _luma(image: np.ndarray) -> np.ndarray:
     return cv2.cvtColor(image, cv2.COLOR_BGR2GRAY).astype(np.int16)
 
 
+_RING_PX = 6  # matches _ring_modal_colour's own default — see build_text_mask
+
+
 def build_text_mask(
     image: np.ndarray,
     boxes: list[tuple[float, float, float, float]],
     dilate_px: int = 3,
 ) -> np.ndarray:
-    """Mask = dilated text boxes ∩ everything that isn't local paper.
+    """Mask = dilated text boxes ∩ everything that differs from local paper.
 
     Per-box rather than global: a plan may be tinted, and a label may sit
     on a lighter or darker patch than the sheet average. Intersecting
@@ -58,15 +61,35 @@ def build_text_mask(
     erase from wiping a wall edge that merely passes through a corner —
     and what it does catch of the linework, line repair puts back.
 
-    Every OTHER box's pixels are excluded from a box's own paper sample.
-    Real plans crowd runs a few pixels apart (a room's number beside its
+    "Local paper" is read from the ring immediately OUTSIDE each box,
+    not the box's own interior. That is a deliberate change from reading
+    the interior's own light end: the interior is exactly the one region
+    guaranteed to contain the glyph, so a box that happens to be MOSTLY
+    ink, or — the case this fixes — reverse-out text lighter than its
+    own background (white room-name lettering knocked out of a filled
+    panel), makes the interior's own brightness distribution describe
+    the glyph, not the paper. A reverse-out box's light end is the glyph
+    itself, so the old "darker than the light end" test never fired: the
+    panel got erased as "not paper" and the white lettering was judged
+    paper and left standing, confirmed surviving whole and unmirrored on
+    a synthetic reverse-out label. The ring just outside the box has no
+    such ambiguity — it is real surrounding material almost by
+    definition, whichever kind of material that is.
+
+    Every OTHER box's pixels are excluded from the ring sample. Real
+    plans crowd runs a few pixels apart (a room's number beside its
     door-swing radius label, e.g. 'Bad' next to '1400') — close enough
-    that their dilated rectangles overlap. Without this exclusion, a
-    neighbour's dark ink counted toward *this* box's 90th-percentile
-    "paper" estimate, dragging it down until the neighbour's own light
-    antialiased fringe read as paper and survived the fill — a visible
-    grey ghost of both labels, confirmed on this exact 'Bad'/'1400'
-    cluster in the golden fixture.
+    that a 6px ring reaches a neighbour. Without this exclusion, a
+    neighbour's dark ink corrupted *this* box's paper reading, dragging
+    it toward grey until the neighbour's own light antialiased fringe
+    read as paper and survived the fill — a visible grey ghost of both
+    labels, confirmed on this exact 'Bad'/'1400' cluster in the golden
+    fixture.
+
+    Masked by absolute deviation from that reference, not "darker than
+    paper": ink lighter than its surround needs exactly the same erase
+    as ink darker than it, so one symmetric test replaces what would
+    otherwise be two directions to get right — and get wrong.
     """
     gray = _luma(image)
     h, w = gray.shape[:2]
@@ -86,26 +109,46 @@ def build_text_mask(
     for i, (bx0, by0, bx1, by1) in enumerate(rects):
         if bx1 <= bx0 or by1 <= by0:
             continue
-        patch = gray[by0:by1, bx0:bx1]
 
-        exclude = np.zeros(patch.shape, dtype=bool)
+        rx0, ry0 = max(0, bx0 - _RING_PX), max(0, by0 - _RING_PX)
+        rx1, ry1 = min(w, bx1 + _RING_PX), min(h, by1 + _RING_PX)
+        ring = gray[ry0:ry1, rx0:rx1]
+
+        # This box's own interior, plus every OTHER box's footprint that
+        # reaches into the ring band, excluded from the sample — neither
+        # is real surrounding material.
+        exclude = np.zeros(ring.shape, dtype=bool)
+        ix0, iy0 = bx0 - rx0, by0 - ry0
+        ix1, iy1 = ix0 + (bx1 - bx0), iy0 + (by1 - by0)
+        exclude[max(0, iy0):max(0, iy1), max(0, ix0):max(0, ix1)] = True
         for j, (ox0, oy0, ox1, oy1) in enumerate(rects):
             if j == i:
                 continue
-            ix0, iy0 = max(ox0, bx0), max(oy0, by0)
-            ix1, iy1 = min(ox1, bx1), min(oy1, by1)
-            if ix1 > ix0 and iy1 > iy0:
-                exclude[iy0 - by0 : iy1 - by0, ix0 - bx0 : ix1 - bx0] = True
+            jx0, jy0 = max(ox0, rx0), max(oy0, ry0)
+            jx1, jy1 = min(ox1, rx1), min(oy1, ry1)
+            if jx1 > jx0 and jy1 > jy0:
+                exclude[jy0 - ry0 : jy1 - ry0, jx0 - rx0 : jx1 - rx0] = True
 
-        sample = patch[~exclude] if exclude.any() else patch
-        if sample.size == 0:  # neighbours claimed the whole patch — fall back
-            sample = patch
+        sample = ring[~exclude] if exclude.any() else ring.reshape(-1)
+        if sample.size == 0:  # ring fully claimed — fall back to the raw band
+            sample = ring.reshape(-1)
+        if sample.size == 0:  # box touches the image edge on every side
+            continue
 
-        # Local paper = the light end of this patch, not its mean: a box
-        # containing mostly ink would otherwise set a paper level so low
-        # that nothing gets erased.
-        paper = float(np.percentile(sample, 90))
-        mask[by0:by1, bx0:bx1] |= (patch < paper - PAPER_TOLERANCE).astype(np.uint8) * 255
+        # Modal, not mean or a percentile: a ring that clips a black
+        # wall would otherwise read as grey paper on one box and true
+        # paper on its neighbour a few pixels along — see
+        # _ring_modal_colour's own docstring for the confirmed instance
+        # of exactly this failure.
+        quantised = (sample // 8) * 8
+        values, counts = np.unique(quantised, return_counts=True)
+        winning = values[int(np.argmax(counts))]
+        paper = float(sample[quantised == winning].mean())
+
+        patch = gray[by0:by1, bx0:bx1]
+        mask[by0:by1, bx0:bx1] |= (
+            np.abs(patch.astype(np.float32) - paper) > PAPER_TOLERANCE
+        ).astype(np.uint8) * 255
 
     return mask
 
@@ -291,6 +334,26 @@ def _looks_patterned(image: np.ndarray, box: tuple[int, int, int, int], ring_px:
 # containment, 35px below the smallest genuine extension observed).
 _MIN_LINE_EXTENSION_PX = 20.0
 
+# A disk-opening pre-filter (drop any locally-thick material before the
+# extension test below, so a filled room panel or a reverse-out label's
+# own dark background can't stand in as "genuine linework" the way a
+# large fill otherwise can — see build_text_mask's own docstring for the
+# reverse-out case this was chasing) was tried here and reverted. It
+# worked on the golden fixture in isolation — a kernel size existed
+# (31px) that reproduced the unfiltered flank recovery exactly while
+# fully closing a synthetic panel's ghost-outline leak — but that window
+# was only 31–33px wide, and re-mirroring an already-mirrored sheet
+# redraws every line with very slightly different antialiasing, which
+# was enough to push a real wall segment near '1680'/'870' below the
+# same threshold on the second pass: `test_mirroring_twice_returns_
+# close_to_the_source` started failing deterministically, with a
+# visible notch cut into both dimension lines that was not there
+# without the filter. A fix whose safety margin doesn't survive the
+# pipeline's own round trip is worse than the narrower cosmetic issue
+# (a thin antialiased outline surviving around reverse-out text — see
+# build_text_mask) it was trying to close. Left as a known, documented
+# residual rather than shipped.
+
 
 def _restore_line_pixels(
     image: np.ndarray,
@@ -311,6 +374,18 @@ def _restore_line_pixels(
     ``_MIN_LINE_EXTENSION_PX``) — a component fully contained inside the
     box it was found in is a glyph stroke line_pixel_mask mistook for
     linework, not a real line the erase needs to repair.
+
+    A large 2D fill (a filled room panel, or a reverse-out label's own
+    dark background) can ALSO pass this test — a solid rectangle
+    trivially contains 40px+ runs everywhere, so line_pixel_mask cannot
+    tell "large fill" from "real line" on its own — and a disk-opening
+    pre-filter meant to make that distinction was tried and reverted;
+    see the comment above ``_MIN_LINE_EXTENSION_PX`` for why. A
+    reverse-out label sitting inside such a fill can therefore still
+    show a faint antialiased outline of itself surviving through the
+    flank below — see build_text_mask's own docstring for the much more
+    severe bug (the whole label surviving unmirrored) this module does
+    fix, and for why the residual outline was judged the lesser risk.
 
     A line is repaired in two bands, because its core and its edge want
     different answers:
