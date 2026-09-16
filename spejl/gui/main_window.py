@@ -11,7 +11,8 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QUrl, Qt
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (
     QButtonGroup,
     QFileDialog,
@@ -32,8 +33,9 @@ from PySide6.QtWidgets import (
 
 from spejl.gui.imaging import load_preview
 from spejl.gui.widgets import DropZone, ScaledImageLabel
-from spejl.gui.worker import MirrorWorker
+from spejl.gui.worker import MirrorWorker, VerifyWorker
 from spejl.models import Axis, Document, Route
+from spejl.qa.verify import VerifyReport
 
 _ACCENT = "#0A6E8A"
 
@@ -67,6 +69,12 @@ QPushButton#saveButton {{
 }}
 QPushButton#saveButton:disabled {{ border-color: palette(mid); color: {_DISABLED_TEXT}; }}
 QPushButton#saveButton:hover:!disabled {{ background: rgba(10, 110, 138, 0.08); }}
+QPushButton#verifyButton {{
+    border: 1px solid palette(mid); color: palette(text); border-radius: 6px;
+    padding: 8px 14px; background: transparent;
+}}
+QPushButton#verifyButton:disabled {{ border-color: palette(mid); color: {_DISABLED_TEXT}; }}
+QPushButton#verifyButton:hover:!disabled {{ background: palette(alternate-base); }}
 #routeBadge {{ font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }}
 #routeBadge[route="vector"] {{ background: rgba(10, 110, 138, 0.15); color: {_ACCENT}; }}
 #routeBadge[route="raster"] {{ background: rgba(162, 76, 7, 0.15); color: #A24C07; }}
@@ -83,7 +91,11 @@ class MainWindow(QMainWindow):
 
         self._input_path: Path | None = None
         self._output_path: Path | None = None
+        self._output_axis: Axis | None = None
+        self._output_route: Route | None = None
         self._worker: MirrorWorker | None = None
+        self._verify_worker: VerifyWorker | None = None
+        self._diff_overlay_path: Path | None = None
         self._temp_dir = tempfile.TemporaryDirectory(prefix="spejl_gui_")
 
         central = QWidget()
@@ -154,6 +166,28 @@ class MainWindow(QMainWindow):
         self._save_button.setEnabled(False)
         self._save_button.clicked.connect(self._on_save_clicked)
         layout.addWidget(self._save_button)
+
+        verify_row = QHBoxLayout()
+        self._verify_button = QPushButton("Verify")
+        self._verify_button.setObjectName("verifyButton")
+        self._verify_button.setEnabled(False)
+        self._verify_button.setToolTip(
+            "Independently re-check the mirrored file against the source, "
+            "pixel by pixel — confirms no drawing geometry was lost."
+        )
+        self._verify_button.clicked.connect(self._on_verify_clicked)
+        verify_row.addWidget(self._verify_button)
+
+        self._view_diff_button = QPushButton("View Diff")
+        self._view_diff_button.setObjectName("verifyButton")
+        self._view_diff_button.setEnabled(False)
+        self._view_diff_button.setToolTip(
+            "Open the verification image: source geometry in black, every "
+            "pixel that differs from the output highlighted in red."
+        )
+        self._view_diff_button.clicked.connect(self._on_view_diff_clicked)
+        verify_row.addWidget(self._view_diff_button)
+        layout.addLayout(verify_row)
 
         return sidebar
 
@@ -278,6 +312,9 @@ class MainWindow(QMainWindow):
         # once the in-flight job actually finishes.
         self._mirror_button.setEnabled(not self._job_running())
         self._save_button.setEnabled(False)
+        self._verify_button.setEnabled(False)
+        self._view_diff_button.setEnabled(False)
+        self._diff_overlay_path = None
         self._flags_list.clear()
         if self._job_running():
             self._status_label.setText("Mirroring the previous file — this one will be ready to mirror once it finishes.")
@@ -365,7 +402,18 @@ class MainWindow(QMainWindow):
             return
         self._mirror_button.setEnabled(True)
         self._output_path = document.output
+        self._output_axis = document.axis
+        self._output_route = route
         self._save_button.setEnabled(True)
+        # Verify re-detects text on the SOURCE to know what to exclude
+        # (see qa/verify.py) — meaningful only for the raster route,
+        # where the drawing is reconstructed from pixels and geometry
+        # loss is a real possibility. A vector PDF is copied through at
+        # the object level and is lossless by construction — there is
+        # nothing for a pixel-diff to usefully check.
+        self._verify_button.setEnabled(route is Route.RASTER)
+        self._view_diff_button.setEnabled(False)
+        self._diff_overlay_path = None
 
         pixmap = load_preview(document.output)
         self._mirrored_view.set_pixmap_source(pixmap)
@@ -388,6 +436,79 @@ class MainWindow(QMainWindow):
         self._mirror_button.setEnabled(True)
         self._status_label.setText("")
         QMessageBox.critical(self, "Couldn't mirror this plan", message)
+
+    def _on_verify_clicked(self) -> None:
+        if self._input_path is None or self._output_path is None or self._output_axis is None:
+            return
+        if self._verify_worker is not None and self._verify_worker.isRunning():
+            return  # same defence-in-depth as _on_mirror_clicked — see its own comment
+        overlay_path = Path(self._temp_dir.name) / f"{self._output_path.stem}_verify_diff.png"
+
+        self._verify_button.setEnabled(False)
+        self._view_diff_button.setEnabled(False)
+        self._progress.show()
+        self._status_label.setText("Verifying against the source… (re-reading the source's own text)")
+
+        self._verify_worker = VerifyWorker(self._input_path, self._output_path, self._output_axis, overlay_path)
+        # Bound at connect time, not read from self._output_path when the
+        # signal fires — same reasoning as MirrorWorker's own job_input
+        # capture (see _on_mirror_clicked): the user may have loaded and
+        # mirrored a different file before this verify job finishes.
+        job_output = self._output_path
+        self._verify_worker.succeeded.connect(
+            lambda report, overlay, job_output=job_output: self._on_verify_succeeded(report, overlay, job_output)
+        )
+        self._verify_worker.failed.connect(
+            lambda message, job_output=job_output: self._on_verify_failed(message, job_output)
+        )
+        self._verify_worker.start()
+
+    def _on_verify_succeeded(self, report: VerifyReport, overlay_path: Path, job_output: Path) -> None:
+        self._progress.hide()
+        if job_output != self._output_path:
+            self._verify_button.setEnabled(self._output_path is not None and self._output_route is Route.RASTER)
+            return
+        self._verify_button.setEnabled(True)
+        self._diff_overlay_path = overlay_path
+        self._view_diff_button.setEnabled(True)
+
+        if report.passed:
+            self._status_label.setText(
+                f"Verified: {report.differing_pct:.2f}% of the page differs from the source, "
+                f"all of it inside {report.text_regions_checked} text label(s). No geometry lost."
+            )
+            item = QListWidgetItem(f"✓  Verify: no geometry lost ({report.differing_pct:.2f}% differs, all text)")
+            item.setForeground(Qt.GlobalColor.darkGreen)
+        else:
+            self._status_label.setText(
+                f"Verify found {report.outside_text_px}px across "
+                f"{len(report.outside_text_regions)} region(s) OUTSIDE any text label — see View Diff."
+            )
+            item = QListWidgetItem(
+                f"✖  Verify: {report.outside_text_px}px across {len(report.outside_text_regions)} "
+                "region(s) outside any text label — possible geometry loss"
+            )
+            item.setForeground(Qt.GlobalColor.red)
+        self._flags_list.addItem(item)
+        if self._flags_list.item(0) is not None and self._flags_list.item(0).text() == "No issues to review.":
+            self._flags_list.takeItem(0)
+
+        if not report.passed:
+            self._on_view_diff_clicked()  # a real finding is worth surfacing immediately, not just noting
+
+    def _on_verify_failed(self, message: str, job_output: Path) -> None:
+        self._progress.hide()
+        if job_output != self._output_path:
+            self._verify_button.setEnabled(self._output_path is not None and self._output_route is Route.RASTER)
+            return
+        self._verify_button.setEnabled(True)
+        self._status_label.setText("")
+        QMessageBox.critical(self, "Couldn't verify this plan", message)
+
+    def _on_view_diff_clicked(self) -> None:
+        if self._diff_overlay_path is None or not self._diff_overlay_path.exists():
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(self._diff_overlay_path)))
 
     def _populate_flags(self, document: Document) -> None:
         self._flags_list.clear()
@@ -426,5 +547,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(2000)
+        if self._verify_worker is not None and self._verify_worker.isRunning():
+            self._verify_worker.wait(2000)
         self._temp_dir.cleanup()
         super().closeEvent(event)

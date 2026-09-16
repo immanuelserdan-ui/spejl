@@ -14,6 +14,7 @@ from pathlib import Path
 from PySide6.QtCore import QThread, Signal
 
 from spejl.models import Axis, Document, Route
+from spejl.qa.verify import VerifyReport
 from spejl.router import sniff_route
 
 
@@ -51,3 +52,35 @@ class MirrorWorker(QThread):
             return
 
         self.succeeded.emit(document, route)
+
+
+class VerifyWorker(QThread):
+    """Runs qa/verify.py's own OCR-backed check off the UI thread, for
+    the same reason MirrorWorker does — it re-detects text on the
+    source image, which costs the same few seconds a mirror job's own
+    detection pass does."""
+
+    succeeded = Signal(object, object)  # VerifyReport, overlay Path
+    failed = Signal(str)
+
+    def __init__(self, source_path: Path, output_path: Path, axis: Axis, overlay_path: Path) -> None:
+        super().__init__()
+        self.source_path = source_path
+        self.output_path = output_path
+        self.axis = axis
+        self.overlay_path = overlay_path
+
+    def run(self) -> None:
+        from spejl.qa.verify import render_diff_overlay, verify_mirror
+
+        try:
+            report: VerifyReport = verify_mirror(self.source_path, self.output_path, self.axis)
+            # Rendered unconditionally, pass or fail — seeing that the
+            # only red is where text sits is exactly what makes a
+            # PASSING result trustworthy rather than just asserted.
+            render_diff_overlay(self.source_path, self.output_path, self.axis, self.overlay_path)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
+            self.failed.emit(str(exc))
+            return
+
+        self.succeeded.emit(report, self.overlay_path)
