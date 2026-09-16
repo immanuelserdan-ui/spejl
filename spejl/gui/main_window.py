@@ -257,14 +257,32 @@ class MainWindow(QMainWindow):
     # Behaviour
     # ------------------------------------------------------------------
 
+    def _job_running(self) -> bool:
+        return self._worker is not None and self._worker.isRunning()
+
     def _on_file_chosen(self, path: Path) -> None:
         self._input_path = path
         self._output_path = None
         self._drop_zone.set_file(path)
-        self._mirror_button.setEnabled(True)
+        # Not re-enabled while a job is still in flight: the worker
+        # already running holds its OWN captured input/output paths
+        # (MirrorWorker.__init__ copies them), so swapping the file here
+        # is harmless to it — but enabling this button would let a click
+        # start a SECOND MirrorWorker and overwrite self._worker with it
+        # while the first is still running. Nothing then holds a Python
+        # reference to that first worker any more, even though its
+        # background thread keeps running — a silent resource leak at
+        # best, a use-after-free crash at worst if PySide6 garbage-
+        # collects the orphaned QThread wrapper out from under its own
+        # still-executing C++ thread. _on_mirror_succeeded re-enables it
+        # once the in-flight job actually finishes.
+        self._mirror_button.setEnabled(not self._job_running())
         self._save_button.setEnabled(False)
         self._flags_list.clear()
-        self._status_label.setText("")
+        if self._job_running():
+            self._status_label.setText("Mirroring the previous file — this one will be ready to mirror once it finishes.")
+        else:
+            self._status_label.setText("")
         self._mirrored_view.set_pixmap_source(None)
 
         from spejl.router import sniff_route
@@ -298,6 +316,16 @@ class MainWindow(QMainWindow):
     def _on_mirror_clicked(self) -> None:
         if self._input_path is None:
             return
+        if self._job_running():
+            # Defence in depth alongside the button-disable above: the
+            # button being disabled during a run is what's SUPPOSED to
+            # make this unreachable, but nothing here costs anything to
+            # also refuse outright rather than trust that one piece of
+            # UI state never gets out of sync with reality — see
+            # _on_file_chosen's own comment for exactly the scenario
+            # (a second worker silently orphaning the first, still-
+            # running one) this and that guard together close off.
+            return
         axis = next(a for a, btn in self._axis_buttons.items() if btn.isChecked())
         out_name = f"{self._input_path.stem}_mirrored{self._input_path.suffix}"
         output_path = Path(self._temp_dir.name) / out_name
@@ -309,12 +337,32 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Mirroring… (OCR can take a few seconds)")
 
         self._worker = MirrorWorker(self._input_path, output_path, axis)
-        self._worker.succeeded.connect(self._on_mirror_succeeded)
-        self._worker.failed.connect(self._on_mirror_failed)
+        # The worker's OWN input path, bound at connect time — not
+        # read from self._input_path when the signal fires, since by
+        # then the user may have loaded a different file (see
+        # _on_file_chosen). Lets the handler tell "my job finished"
+        # apart from "A job finished, possibly someone else's".
+        job_input = self._input_path
+        self._worker.succeeded.connect(
+            lambda document, route, job_input=job_input: self._on_mirror_succeeded(document, route, job_input)
+        )
+        self._worker.failed.connect(
+            lambda message, job_input=job_input: self._on_mirror_failed(message, job_input)
+        )
         self._worker.start()
 
-    def _on_mirror_succeeded(self, document: Document, route: Route) -> None:
+    def _on_mirror_succeeded(self, document: Document, route: Route, job_input: Path) -> None:
         self._progress.hide()
+        if job_input != self._input_path:
+            # This job's own result is for a file the user has since
+            # navigated away from (see _on_file_chosen) — applying it
+            # now would silently replace whatever the CURRENT file's
+            # own state is with a stale result the user never asked to
+            # see. _on_file_chosen already re-enabled the mirror button
+            # for the current file once this (the job it was waiting
+            # on) finishes; nothing else here is still relevant.
+            self._mirror_button.setEnabled(not self._job_running())
+            return
         self._mirror_button.setEnabled(True)
         self._output_path = document.output
         self._save_button.setEnabled(True)
@@ -331,7 +379,11 @@ class MainWindow(QMainWindow):
         )
         self._populate_flags(document)
 
-    def _on_mirror_failed(self, message: str) -> None:
+    def _on_mirror_failed(self, message: str, job_input: Path) -> None:
+        if job_input != self._input_path:
+            self._progress.hide()
+            self._mirror_button.setEnabled(not self._job_running())
+            return
         self._progress.hide()
         self._mirror_button.setEnabled(True)
         self._status_label.setText("")

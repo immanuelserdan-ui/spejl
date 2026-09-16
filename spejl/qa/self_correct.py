@@ -69,7 +69,6 @@ from typing import Protocol
 
 import cv2
 import numpy as np
-from fontTools.ttLib import TTFont
 
 from spejl.models import Axis, Flag
 from spejl.render.text import RenderedRun, render_run
@@ -347,7 +346,29 @@ def _font_cmap(font_path: str) -> frozenset[int]:
     would have silently reported both as "covered". The font's own cmap
     table is the one place "does this font have a real glyph for this
     codepoint" is actually recorded.
+
+    ``fontTools`` is imported HERE, not at module level, deliberately:
+    this is the only function in the whole S8 gate that needs it. An
+    unconditional top-of-file import made it a hard dependency of
+    `spejl.raster.pipeline` itself — confirmed by actually simulating a
+    missing install: the entire raster pipeline (detect, erase, render,
+    every stage that has nothing to do with the QA gate) failed to
+    IMPORT, not just to run the font check, and `qa_gate=False` gave no
+    way around it either, since the failure happened before any caller
+    code ever runs. Deferred here, only `check_text_fidelity` (and
+    therefore only a `qa_gate=True` run) ever needs `fontTools`
+    installed at all.
     """
+    try:
+        from fontTools.ttLib import TTFont
+    except ImportError as exc:
+        raise RuntimeError(
+            "Font glyph-coverage checking needs the 'fonttools' package "
+            "(pip install fonttools, or the 'raster' extra) — Spejl will "
+            "not silently skip the check and call unverified text fidelity "
+            "clean."
+        ) from exc
+
     tt = TTFont(font_path, fontNumber=0, lazy=True)
     try:
         return frozenset(tt.getBestCmap() or {})

@@ -89,3 +89,36 @@ def test_every_vertical_dimension_is_found_and_read(report):
     for run in verticals:
         assert run.found, f"{run.truth} not detected"
         assert run.exact_corrected, f"{run.truth} read as {run.corrected!r}"
+
+
+def test_an_ocr_engine_failure_is_normalised_to_a_runtime_error(backend):
+    """Regression: RapidOcrBackend.detect_and_recognise had no exception
+    handling around the engine call at all. onnxruntime's own exception
+    family (Fail, InvalidArgument, ...) inherits directly from Exception
+    — confirmed by inspecting the hierarchy directly — sharing no base
+    with ValueError/OSError/RuntimeError, the three types cli.py's own
+    top-level handler catches. Left unwrapped, a real engine failure on
+    an adversarial or merely unusual scan would reach the CLI as a raw,
+    uncaught exception — a Python traceback instead of the clean,
+    actionable message every other failure path in this project shows.
+
+    The real ``self._ocr`` callable is swapped out, not the whole
+    backend: this only needs to prove `detect_and_recognise` catches and
+    re-wraps whatever the engine raises, not that a specific onnxruntime
+    exception is reachable from a specific bad image — restored
+    afterwards since `backend` is session-scoped and shared by every
+    other test in this file.
+    """
+    import numpy as np
+
+    class _EngineExplodes:
+        def __call__(self, image):
+            raise RuntimeError("simulated onnxruntime.capi.onnxruntime_pybind11_state.Fail")
+
+    original = backend._ocr
+    backend._ocr = _EngineExplodes()
+    try:
+        with pytest.raises(RuntimeError, match="OCR engine failed"):
+            backend.detect_and_recognise(np.zeros((10, 10, 3), dtype=np.uint8))
+    finally:
+        backend._ocr = original

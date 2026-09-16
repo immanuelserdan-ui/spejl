@@ -207,3 +207,113 @@ def test_mirror_failure_is_shown_not_raised(window, tmp_path, qapp):
 
     assert "failed" in outcome, outcome
     assert window._mirror_button.isEnabled()  # re-enabled after failure
+
+
+class _FakeRunningWorker:
+    """Stands in for a MirrorWorker that's still executing — real
+    thread timing is not something a test should have to win a race
+    against to be deterministic; `isRunning()` is the one thing
+    _on_mirror_clicked and _on_file_chosen actually check. `wait()` is
+    a no-op so the window fixture's own teardown (closeEvent calls
+    `self._worker.wait(2000)` for a genuinely running worker) doesn't
+    fail on this stand-in once the test itself is done with it."""
+
+    def isRunning(self) -> bool:  # noqa: N802 (matches QThread's own name)
+        return True
+
+    def wait(self, _timeout_ms: int) -> bool:
+        return True
+
+
+def test_a_click_while_a_job_is_running_does_not_spawn_a_new_worker(window, tmp_path):
+    """Regression: nothing gated _on_mirror_clicked against an in-flight
+    job, and _on_file_chosen unconditionally re-enabled the mirror
+    button regardless of worker state — so dropping a second file while
+    the first was still mirroring, then clicking Mirror again, created a
+    SECOND MirrorWorker and overwrote self._worker with it while the
+    first was still running in the background. Nothing then held a
+    Python reference to that first, still-running QThread — a resource
+    leak at best (two OCR pipelines racing for CPU when the user asked
+    for one), a PySide6 use-after-free crash at worst if the orphaned
+    wrapper got garbage-collected out from under its own live thread.
+    """
+    from spejl.qa import fixture_gen
+
+    info = fixture_gen.generate(tmp_path, dpi=100)
+    window._on_file_chosen(info["png"])
+
+    running = _FakeRunningWorker()
+    window._worker = running  # type: ignore[assignment]
+
+    # A new file arriving while a job is (per the fake) still running
+    # must not re-enable the button.
+    window._on_file_chosen(info["png"])
+    assert not window._mirror_button.isEnabled()
+
+    # And a click that reaches the handler anyway must refuse to start
+    # a second worker rather than replace self._worker.
+    window._on_mirror_clicked()
+    assert window._worker is running, "a second worker was created while the first was still 'running'"
+
+
+def test_a_stale_jobs_result_does_not_overwrite_a_different_current_file(window, tmp_path):
+    """The other half of the same fix: once a job's own file is no
+    longer the one on screen (the user navigated away from it while it
+    ran), its result must be silently discarded, not applied over
+    whatever the CURRENT file's state is — otherwise a job the user has
+    moved on from can still pop its output into view moments later.
+
+    Needs a job that genuinely SUCCEEDS to be a real test of this: the
+    bug lived in _on_mirror_succeeded overwriting `_output_path` and the
+    preview, and the earlier, failure-only version of this test passed
+    even against the pre-fix code, because a FAILED job's old handler
+    never touched `_output_path` regardless of staleness — the assertion
+    was trivially satisfied by the wrong mechanism. A real vector PDF
+    (Route.VECTOR -> mirror_pdf) gets a genuine success fast, with none
+    of the OCR-model-loading cost this file otherwise deliberately
+    avoids (see its own module docstring).
+
+    Polls `job_worker.isRunning()` via QCoreApplication.processEvents()
+    rather than waiting on the worker's OWN succeeded/failed signal:
+    that signal is already connected to _on_mirror_clicked's internal
+    handlers BEFORE this test ever sees `job_worker`, and a fast vector
+    mirror can finish and emit before a SECOND, test-local connection
+    made after the fact ever gets attached — a real race, confirmed by
+    this exact test hanging its full 15s safety timeout on a job that
+    had actually already succeeded in well under a second. Polling
+    observable state sidesteps needing to win that race at all.
+    """
+    from PySide6.QtCore import QCoreApplication
+
+    from spejl.qa import fixture_gen
+
+    info = fixture_gen.generate(tmp_path, dpi=100)
+    window._on_file_chosen(info["pdf"])
+    assert window._route_badge.property("route") == "vector"  # sanity: really Route.VECTOR
+
+    window._on_mirror_clicked()
+    job_worker = window._worker
+    assert job_worker is not None
+
+    # Simulate the user navigating away from the PDF WHILE that job is
+    # still in flight for it — set synchronously, before polling below,
+    # so this is deterministic rather than a race against the worker
+    # thread's own timing.
+    other = tmp_path / "other.pdf"
+    other.write_bytes(info["pdf"].read_bytes())
+    window._input_path = other
+
+    for _ in range(300):  # up to ~3s
+        QCoreApplication.processEvents()
+        if not job_worker.isRunning():
+            break
+        job_worker.wait(10)
+    assert not job_worker.isRunning(), "job never finished — test setup itself is broken"
+    QCoreApplication.processEvents()  # let the now-queued succeeded/failed signal be delivered
+
+    # The job was for the original PDF; the screen has since moved on
+    # to `other`. Its result must not have been applied, but the button
+    # must still end up enabled again now that nothing is running.
+    assert window._input_path == other
+    assert window._mirror_button.isEnabled()
+    assert window._output_path is None

@@ -7,12 +7,32 @@ batch runs over a whole unit-type folder work from day one.
 from __future__ import annotations
 
 import json
+import sys
 from pathlib import Path
 
 import typer
 
 from spejl.models import Axis, Route
 from spejl.router import sniff_route
+
+# A diagnostic message can legitimately contain a mirrored run's own
+# text — the success path already guards against this for its own
+# fixed ASCII wording (see below), but a QAGateFailure's message (S8,
+# raster/pipeline.py) interpolates a run's actual corrected string,
+# which for a real plan means Danish diacritics (Køkken, Værelse) —
+# exactly the content most likely to sit outside a legacy Windows
+# console's default cp1252 codepage. Reconfiguring stdout/stderr to
+# UTF-8 up front means that content actually DISPLAYS correctly on any
+# terminal that supports it (Windows Terminal, PowerShell 7+, every
+# non-Windows shell), rather than depending on whichever version of
+# click/typer happens to be installed to silently degrade a message
+# that fails to encode into "?" or "�" instead of crashing — a
+# real, but never crash-proof-by-specification, safety net this
+# shouldn't have to rely on. `errors="replace"` keeps that net anyway,
+# for the genuinely legacy consoles UTF-8 itself can't save.
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        _stream.reconfigure(encoding="utf-8", errors="replace")
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 

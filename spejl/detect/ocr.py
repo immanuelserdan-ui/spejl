@@ -56,7 +56,31 @@ class RapidOcrBackend:
         self._ocr = RapidOCR(**kwargs)
 
     def detect_and_recognise(self, image: np.ndarray) -> list[Detection]:
-        raw, _elapse = self._ocr(image)
+        try:
+            raw, _elapse = self._ocr(image)
+        except Exception as exc:
+            # The one place this project's own "everything downstream
+            # depends on Detection, never on a vendor's return shape"
+            # rule (this module's own docstring) has to hold for
+            # FAILURE, not just success. onnxruntime's own exception
+            # family (Fail, InvalidArgument, ...) inherits directly
+            # from Exception — confirmed by inspecting it directly, not
+            # assumed — sharing no base with ValueError/OSError/
+            # RuntimeError, the three types cli.py's own top-level
+            # handler actually catches. Left unwrapped, an adversarial
+            # or merely unusual real-world scan (an extreme aspect
+            # ratio, a corrupted file that decodes far enough to reach
+            # OCR before falling apart) could raise a raw onnxruntime
+            # exception straight through mirror_raster and out past
+            # that handler — a bare Python traceback instead of the
+            # clean, actionable message this project builds every other
+            # failure path to show. Normalised to RuntimeError here,
+            # the one place that knows which engine is actually
+            # running, rather than asking every caller to learn and
+            # enumerate onnxruntime's own exception hierarchy.
+            raise RuntimeError(
+                f"OCR engine failed while reading this sheet ({type(exc).__name__}: {exc})."
+            ) from exc
         if not raw:
             return []
         out: list[Detection] = []
