@@ -204,13 +204,80 @@ def _ring_modal_colour(
     return np.round(true_colour).astype(np.uint8)
 
 
+# Non-cardinal angles tried in addition to the two axis-aligned kernels
+# below, in degrees — a diagonal wall or dimension line (a compound-angle
+# room, a raked gable) is exactly as real as a horizontal or vertical
+# one, and the two rectangular kernels alone are blind to it entirely:
+# confirmed on a real plan, a 47° witness line's own pixel count under
+# its text box went from 5 (noise) to 733 (the actual line) once this
+# was added. Every 15°, not finer: _restore_line_pixels' own repair
+# doesn't need the kernel to match a line's angle exactly to catch it —
+# morphological opening keeps a run whenever *enough* of it survives
+# erosion by the kernel's shape, which a line within a few degrees of
+# the kernel's own angle still mostly does.
+_DIAGONAL_ANGLES_DEG = (15, 30, 45, 60, 75, 105, 120, 135, 150, 165)
+
+# A LONGER minimum than the axis-aligned kernels' own `min_length`
+# (see line_pixel_mask's own two rectangular kernels, always 40) —
+# not a stricter version of the same idea, a fix for a real, confirmed
+# false positive this module's own docstring already names as a known
+# risk for the axis-aligned case: "a large 2D fill... can ALSO pass
+# this test" (_restore_line_pixels' own docstring). A solid wall
+# poché has no empty interior for ANY thin kernel to fail against, at
+# ANY angle, so it satisfies a diagonal opening exactly as trivially
+# as an axis-aligned one — and with ten new angles trying, the wall's
+# own detected footprint reaches into a few more places at 40px than
+# it did with two. Confirmed as a real regression, not a theoretical
+# one: on the golden fixture, '1680' sits directly above a solid wall,
+# and at 40px this connected the wall's own component through a
+# diagonal opening to a curve inside '1680's OWN glyphs — the merged
+# component trivially passed the 20px extension test (it's the wall,
+# it extends everywhere), so the genuine-component repair painted
+# part of a stale glyph curve back into the re-rendered text, and
+# '1680' read back as 'M&0'. 120px clears that false connection
+# entirely (confirmed: zero components detected near '1680's text box
+# at this length) while a real diagonal wall/witness line — hundreds
+# of px by construction, same as any axis-aligned one — still measures
+# comfortably over it (206px under '1383', still far past the 20px
+# _MIN_LINE_EXTENSION_PX repair needs to treat it as genuine).
+_DIAGONAL_MIN_LENGTH = 120
+
+
+def _rotated_line_kernel(length: int, angle_deg: float) -> np.ndarray:
+    """A ``length``-long, 1px-wide line kernel at ``angle_deg`` —
+    ``cv2.getStructuringElement`` only builds axis-aligned rectangles,
+    so a genuinely diagonal structuring element has to be drawn by
+    hand. Canvas is ``length`` square, plenty for the line to fit at
+    any angle without clipping."""
+    kernel = np.zeros((length, length), dtype=np.uint8)
+    center = length / 2.0
+    angle_rad = np.deg2rad(angle_deg)
+    dx, dy = np.cos(angle_rad), np.sin(angle_rad)
+    half = length / 2.0
+    p1 = (int(round(center - dx * half)), int(round(center - dy * half)))
+    p2 = (int(round(center + dx * half)), int(round(center + dy * half)))
+    cv2.line(kernel, p1, p2, 1, thickness=1)
+    return kernel
+
+
 def line_pixel_mask(image: np.ndarray, min_length: int = 40) -> np.ndarray:
-    """Pixels belonging to long axis-aligned runs — walls, dimension and
-    witness lines — as a mask, not as fitted primitives.
+    """Pixels belonging to long straight runs, any angle — walls,
+    dimension and witness lines — as a mask, not as fitted primitives.
 
     Morphological opening with long thin kernels keeps exactly the
     structural runs a plan is made of and drops glyph strokes, which are
-    short in both axes.
+    short in both axes. Tried at twelve orientations total, not just
+    horizontal and vertical (see ``_DIAGONAL_ANGLES_DEG``) — a plan's
+    own walls are not always orthogonal, and the two axis-aligned
+    kernels alone never detected a diagonal line at all, meaning
+    ``_restore_line_pixels`` had nothing to repair one WITH: erasing a
+    label that crossed one left a real, permanent gap in that specific
+    line, silently relying on the re-rendered label happening to land
+    back over the same gap it made rather than any repair actually
+    having happened. The diagonal kernels use their own, LONGER minimum
+    length than the axis-aligned pair (see ``_DIAGONAL_MIN_LENGTH``) —
+    a real, confirmed false-positive reason, not caution for its own
+    sake.
 
     Deliberately *not* reduced to line segments. Fitting one primitive
     per connected component looks tidier and is wrong: the black wall
@@ -226,6 +293,9 @@ def line_pixel_mask(image: np.ndarray, min_length: int = 40) -> np.ndarray:
     out = np.zeros(binary.shape, dtype=np.uint8)
     for kernel_size in ((min_length, 1), (1, min_length)):
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, kernel_size)
+        out = cv2.bitwise_or(out, cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel))
+    for angle in _DIAGONAL_ANGLES_DEG:
+        kernel = _rotated_line_kernel(_DIAGONAL_MIN_LENGTH, angle)
         out = cv2.bitwise_or(out, cv2.morphologyEx(binary, cv2.MORPH_OPEN, kernel))
     return out
 

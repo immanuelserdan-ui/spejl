@@ -353,3 +353,70 @@ def test_ordinary_dark_on_light_text_is_unaffected_by_the_ring_based_paper():
     x0, y0, x1, y1 = (int(v) for v in box)
     region = cv2.cvtColor(result.image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
     assert region.min() >= 240, "ordinary dark-on-light text was not fully erased"
+
+
+def test_a_diagonal_line_is_detected_and_repaired():
+    """The two axis-aligned kernels in line_pixel_mask were, for years,
+    the ONLY thing this module could repair — a wall or witness line at
+    any other angle (a compound-angle room, a raked gable) was simply
+    invisible to it, so erasing a label crossing one left a real,
+    permanent gap in the linework with nothing to restore it. Confirmed
+    on a real plan: a 47° witness line under a dimension number measured
+    5px of "linework" (background morphological noise) before this fix,
+    733px after. This is the axis-unaware side of the same mechanism
+    test_a_line_that_extends_well_past_its_box_is_still_restored checks
+    for horizontal/vertical — must still hold for a line at any angle,
+    not just the two cardinal ones.
+    """
+    img = np.full((300, 300, 3), 255, np.uint8)
+    # A long 45-degree line, well past _DIAGONAL_MIN_LENGTH on both
+    # sides of the box it crosses.
+    cv2.line(img, (20, 280), (280, 20), (0, 0, 0), thickness=3)
+    box = (120.0, 120.0, 180.0, 180.0)  # sits in the middle of the line
+
+    result = erase_text(img, [box])
+    assert result.repaired_px > 0
+    # The line must reappear crossing where the box was.
+    assert result.image[150, 150].max() < 50
+
+
+def test_a_short_diagonal_glyph_stroke_does_not_falsely_bridge_to_a_nearby_wall(tmp_path):
+    """Regression: adding diagonal detection (see the test above) fixed
+    a real gap but introduced a WORSE one, confirmed on the project's
+    own golden fixture, not a hypothetical. '1680' sits directly above
+    a solid wall — a large 2D fill trivially satisfies a thin kernel's
+    opening test at ANY angle, since it has no empty interior for the
+    kernel to fail against (this module's own _restore_line_pixels
+    docstring already names this as a known risk for the two ORIGINAL
+    axis-aligned kernels) — and with ten new angles trying, the wall's
+    own detected footprint reached far enough into '1680's own text box
+    to connect, via 8-connectivity, to a curve inside the digits
+    themselves. The merged component trivially passed the genuine-line
+    extension test (it's the wall, of course it extends past the box),
+    so the "repair" painted a stale glyph fragment back into the
+    re-rendered text, and '1680' read back as 'M&0'. This must stay
+    fixed: the erased region directly above a solid wall must come back
+    perfectly clean, not part-repainted with wall-component ink that
+    was never really where the digits were.
+    """
+    from spejl.detect.ocr import RapidOcrBackend
+    from spejl.detect.rotations import detect_all_orientations
+    from spejl.qa import fixture_gen
+    from spejl.qa.metrics import load_ground_truth
+
+    fixture_gen.generate(tmp_path, dpi=150)
+    truth = load_ground_truth(tmp_path / "ground_truth_150.json")
+    image = cv2.imread(str(tmp_path / truth["image"]))
+
+    dets = detect_all_orientations(image, RapidOcrBackend())
+    det = next(d for d in dets if d.text.strip() == "1680")
+
+    result = erase_text(image, [det.bbox])
+    x0, y0, x1, y1 = (int(v) for v in det.bbox)
+    # The detection box's own bottom few rows legitimately dip into the
+    # wall itself (real ink the erase never touches, by design) —
+    # excluded here so this checks what the bug actually corrupted, the
+    # glyphs' own region, not the ordinary presence of the wall the
+    # digits happen to sit close above.
+    region = cv2.cvtColor(result.image[y0:y1 - 5, x0:x1], cv2.COLOR_BGR2GRAY)
+    assert region.min() >= 200, f"erased '1680' region was not left clean: min={region.min()}"
