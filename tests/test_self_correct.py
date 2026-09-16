@@ -7,7 +7,7 @@ matching how tests/test_render_text.py exercises the renderer directly.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 
 import cv2
 import numpy as np
@@ -28,9 +28,11 @@ from spejl.qa.self_correct import (
     _run_footprint,
     check_clearance,
     check_layer_ordering,
+    check_ocr_confidence,
     check_spatial_integrity,
     check_text_fidelity,
 )
+from spejl.models import Flag
 from spejl.render.text import drawing_alpha_for, render_run, linework_mask_for
 from spejl.style.metrics import TextStyle, resolve_font
 
@@ -64,6 +66,7 @@ class _FakeRun:
     bbox_src: tuple[float, float, float, float]
     style: TextStyle
     kind: str = "dimension"  # not "room" by default — see check_clearance
+    flags: list = field(default_factory=list)  # not "list[Flag]" — see check_ocr_confidence
 
 
 def _plate() -> np.ndarray:
@@ -428,6 +431,72 @@ def test_correct_clearance_never_erases_into_a_neighbouring_run(font_path: str):
     ex0, ey0, ex1, ey1 = _run_footprint(run, target)  # what the correction actually erased
     overlap = ex0 < bx1 and bx0 < ex1 and ey0 < by1 and by0 < ey1
     assert not overlap, "correction erased into a neighbouring run's own ink"
+
+
+# ---------------------------------------------------------------------------
+# Rule 5 — OCR confidence
+# ---------------------------------------------------------------------------
+
+
+def test_ocr_confidence_passes_when_no_run_carries_a_confidence_flag(font_path: str):
+    ctx, _run, _target = _context_with_one_run(font_path)
+    assert check_ocr_confidence(ctx) == []
+
+
+def test_ocr_confidence_catches_a_low_confidence_run(font_path: str):
+    ctx, run, _target = _context_with_one_run(font_path)
+    run.flags.append(Flag("low-confidence", "OCR confidence 0.75 for '1383'.", "warn"))
+
+    violations = check_ocr_confidence(ctx)
+    assert len(violations) == 1
+    assert violations[0].rule is Rule.OCR_CONFIDENCE
+    assert not violations[0].correctable, "an uncertain source read must never be auto-guessed"
+
+
+def test_ocr_confidence_catches_every_flagged_confidence_code(font_path: str):
+    """implausible and annotation-confusable are the other two codes
+    S3/S4 raise for the same underlying reason (OCR unsure what the
+    source says) — not just low-confidence."""
+    ctx, run, _target = _context_with_one_run(font_path)
+    run.flags.append(Flag("implausible", "No lexicon match — confirm this string manually.", "warn"))
+    run.flags.append(Flag(
+        "annotation-confusable",
+        "OCR read 'O' at 0.56 confidence — corrected to the visually-confusable annotation '0'; confirm manually.",
+        "warn",
+    ))
+
+    violations = check_ocr_confidence(ctx)
+    assert {v.kind for v in violations} == {"implausible", "annotation-confusable"}
+
+
+def test_ocr_confidence_ignores_confident_and_already_safe_flags(font_path: str):
+    """lexicon-snap is an ordinary, confident correction (a known
+    abbreviation or diacritic fix) and non-text-symbol means OCR
+    correctly recognised a mark as NOT text and left it alone — neither
+    is a guess about uncertain content that needs a human's OK."""
+    ctx, run, _target = _context_with_one_run(font_path)
+    run.flags.append(Flag("lexicon-snap", "'Vaer. 1' -> 'Vær. 1'", "info"))
+    run.flags.append(Flag("non-text-symbol", "'H*' looks like a drafting symbol.", "info"))
+
+    assert check_ocr_confidence(ctx) == []
+
+
+def test_ocr_confidence_is_never_in_the_corrector_table():
+    """Structural guarantee, not just this test's own opinion: a rule
+    with no safe local fix must have no entry a loop could call — see
+    the module docstring for why guessing at uncertain source text is
+    exactly the mistake this rule exists to prevent shipping."""
+    assert Rule.OCR_CONFIDENCE not in _CORRECTORS
+
+
+def test_gate_refuses_to_save_on_an_unresolved_confidence_flag(font_path: str):
+    ctx, run, _target = _context_with_one_run(font_path)
+    run.flags.append(Flag("low-confidence", "OCR confidence 0.75 for '1383'.", "warn"))
+
+    report = SelfCorrectingQAGate(max_iterations=3).run(ctx)
+    assert not report.passed
+    assert report.iterations == 1, "an uncorrectable violation should stop the loop immediately"
+    assert any(v.rule is Rule.OCR_CONFIDENCE for v in report.violations)
 
 
 def test_spatial_integrity_does_not_flag_geometry_erase_legitimately_removed(font_path: str):

@@ -70,6 +70,26 @@ The rules, and how each is actually decided rather than asserted:
   sitting close enough to its own wall for a corner to clip it, which
   room-name placement never has a legitimate reason to do. Correctable
   within a few bounded nudges away from the geometry it overlaps.
+* **OCR confidence** — no run may carry an unresolved low-confidence,
+  implausible, or confusable-substitution flag (S3/S4's own
+  ``"low-confidence"``, ``"implausible"``, ``"annotation-confusable"``
+  codes — see raster/pipeline.py and lexicon/snap.py). This rule has
+  no corrector, deliberately, and for the same reason spatial integrity
+  has none: these flags exist because OCR was not sure what the SOURCE
+  drawing actually says, not because anything this pipeline drew is
+  wrong. There is no geometry to nudge or box to widen that fixes
+  uncertainty about what a character in the original document was —
+  the pipeline has already done the one safe automated thing it can
+  (a curated confusable substitution, in the one case where it applies,
+  itself flagged for confirmation rather than trusted outright). Every
+  one of these codes already carries its own "confirm manually" message
+  precisely because guessing wrong here means silently shipping an
+  incorrect dimension or label on what may be a real construction
+  document — the one class of mistake this gate exists to make
+  impossible to miss. Before this rule, that confirmation was only ever
+  a warning on an already-saved file; this makes it a save-blocking one,
+  so the human review the flag itself asks for actually has to happen
+  before the file exists.
 
 What this stage deliberately does NOT do: re-run OCR against the
 rendered output to confirm a string reads back correctly. That check is
@@ -105,6 +125,7 @@ class Rule(str, Enum):
     LAYER_ORDERING = "layer-ordering"
     TEXT_FIDELITY = "text-fidelity"
     CLEARANCE = "clearance"
+    OCR_CONFIDENCE = "ocr-confidence"
 
 
 @dataclass(frozen=True)
@@ -166,6 +187,7 @@ class RunLike(Protocol):
     angle_out: float
     bbox_src: tuple[float, float, float, float]
     style: TextStyle
+    flags: list[Flag]  # S3/S4's own OCR-confidence flags — see check_ocr_confidence
 
 
 @dataclass
@@ -791,6 +813,36 @@ def _correct_clearance(ctx: QAContext, violation: Violation) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rule 5 — OCR confidence (no corrector — see the module docstring for why
+# guessing at uncertain source text is exactly the mistake this rule exists
+# to make impossible to ship unreviewed)
+# ---------------------------------------------------------------------------
+
+# S3/S4's own flag codes for "OCR was not sure this is what the source
+# actually says" (raster/pipeline.py's LOW_CONFIDENCE / non-text-symbol
+# checks, lexicon/snap.py's confusable-annotation fallback). Deliberately
+# NOT including "non-text-symbol": that code means the opposite of
+# uncertain content being shipped — it is OCR correctly recognising a mark
+# as NOT text and leaving it untouched as geometry, the safe outcome this
+# rule has nothing to add to. "lexicon-snap" is excluded for the same
+# reason — it reports an ORDINARY, confident correction (a known
+# abbreviation or diacritic fix), not a guess needing confirmation.
+_UNRESOLVED_CONFIDENCE_CODES = frozenset({"low-confidence", "implausible", "annotation-confusable"})
+
+
+def check_ocr_confidence(ctx: QAContext) -> list[Violation]:
+    violations: list[Violation] = []
+    for i, run in enumerate(ctx.runs):
+        for flag in run.flags:
+            if flag.code in _UNRESOLVED_CONFIDENCE_CODES:
+                violations.append(Violation(
+                    Rule.OCR_CONFIDENCE, i, flag.code, flag.message,
+                    0.0, 1.0, correctable=False,
+                ))
+    return violations
+
+
+# ---------------------------------------------------------------------------
 # The loop
 # ---------------------------------------------------------------------------
 
@@ -799,11 +851,12 @@ _CHECKERS: tuple[Callable[[QAContext], list[Violation]], ...] = (
     check_layer_ordering,
     check_text_fidelity,
     check_clearance,
+    check_ocr_confidence,
 )
 
-# Rule.SPATIAL_INTEGRITY has no entry, deliberately — see the module
-# docstring for why that rule can only ever be detected, not repaired
-# here.
+# Rule.SPATIAL_INTEGRITY and Rule.OCR_CONFIDENCE have no entry,
+# deliberately — see the module docstring for why each can only ever be
+# detected, not repaired, here.
 _CORRECTORS: dict[Rule, Callable[[QAContext, Violation], bool]] = {
     Rule.LAYER_ORDERING: _correct_layer_ordering,
     Rule.TEXT_FIDELITY: _correct_text_fidelity,
