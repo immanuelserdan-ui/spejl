@@ -37,6 +37,47 @@ _BOLD_CANDIDATES = (
     "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
 )
 
+# A condensed fallback for the case every regular candidate above
+# shares: none of them is genuinely narrow, so a short, dense string
+# (a 4-digit dimension is the common real case) can need MORE
+# horizontal room than its own measured box allows even after
+# solve_tracking and solve_horizontal_scale both hit their own
+# evidence-based compression floors (see their docstrings — both
+# floors exist to prevent glyphs visually merging into a different,
+# misread character, a real regression this project already found and
+# fixed once; loosening them to chase width is not on the table).
+# When that happens today, render/text.py's own shrink-to-fit loop
+# still has to intervene, cutting px_size — and therefore the run's
+# CAP HEIGHT — purely to recover width room that was never really a
+# height problem. Confirmed on three real dimension numbers from an
+# actual project file, each independently: Arial needed 118-154% of
+# the numbers' own measured width even at both compression floors,
+# which is what pushed their rendered height down to 89-96% of
+# target.
+#
+# Bahnschrift ships as a standard font on every Windows 10/1709+
+# install (same trust level this module already extends to Arial —
+# see _FONT_CANDIDATES' own note: referenced by system path, NEVER
+# bundled into this app's own distribution, since neither is a font
+# this project holds redistribution rights to) and carries a genuine
+# width AXIS as a variable font, with "Condensed" (75% width) as one
+# of its own named instances — not a synthetic squeeze applied after
+# the fact, an actual narrower cut of the same typeface. Tried against
+# the same three real numbers: 98-102% of measured width at FULL,
+# uncompressed cap height — no shrink needed at all. Absent on
+# non-Windows systems; _resolve_condensed_font returns None there and
+# fit_style falls back to today's behaviour unchanged.
+_CONDENSED_FONT_CANDIDATES = ("C:/Windows/Fonts/bahnschrift.ttf",)
+_CONDENSED_VARIATION = "Condensed"
+
+# Mirrors render/text.py's own OVERFLOW_TOLERANCE (1.04) — kept as a
+# separate constant here, not imported, for the same reason
+# lexicon/snap.py's _CONFUSABLE_CONFIDENCE_CEILING mirrors
+# raster/pipeline.py's LOW_CONFIDENCE rather than importing it:
+# render/text.py already imports FROM this module (TextStyle,
+# font_measure_width), so the reverse import would be circular.
+_WIDTH_OVERFLOW_TOLERANCE = 1.04
+
 # ITU-R BT.601 luma weights, BGR order. The one formula every
 # ink/paper or darkest-colour sampler in this project needs against a
 # flat array of pixels — shared here (see bgr_luma) rather than
@@ -63,6 +104,15 @@ class TextStyle:
     cap_height_px: float           # measured ink extent across the baseline
     ink_along_px: float = 0.0      # measured ink extent along the baseline
     width_scale: float = 1.0       # horizontal stretch/compress, applied after tracking — see solve_horizontal_scale
+    # Named instance to select on a VARIABLE font (e.g. "Condensed" on
+    # Bahnschrift — see _CONDENSED_FONT_CANDIDATES) — None for every
+    # ordinary, non-variable candidate in _FONT_CANDIDATES/
+    # _BOLD_CANDIDATES, which is all of them except the condensed
+    # fallback. A font swap that changes font_path (see
+    # self_correct.py's _correct_text_fidelity, font-coverage path)
+    # must clear this back to None: a newly-chosen font has no reason
+    # to share a variation name with whatever this run was on before.
+    font_variation: str | None = None
 
 
 def resolve_font(bold: bool = False) -> str:
@@ -77,9 +127,24 @@ def resolve_font(bold: bool = False) -> str:
     )
 
 
+def _resolve_condensed_font() -> str | None:
+    """The one condensed candidate, if this system has it — None,
+    gracefully, everywhere else (non-Windows, or Windows older than
+    1709). Never raises: unlike resolve_font's own regular candidates,
+    this one is an optimisation fit_style can do without, not a
+    requirement rendering depends on."""
+    for path in _CONDENSED_FONT_CANDIDATES:
+        if Path(path).exists():
+            return path
+    return None
+
+
 @lru_cache(maxsize=512)
-def _font(path: str, size: int) -> ImageFont.FreeTypeFont:
-    return ImageFont.truetype(path, size)
+def _font(path: str, size: int, variation: str | None = None) -> ImageFont.FreeTypeFont:
+    font = ImageFont.truetype(path, size)
+    if variation is not None:
+        font.set_variation_by_name(variation)
+    return font
 
 
 def measure_ink_and_paper(
@@ -1077,7 +1142,8 @@ def _main_glyph_cluster(
 
 
 def fit_font_size(
-    text: str, target_cap_height: float, font_path: str, lo: int = 4, hi: int = 400
+    text: str, target_cap_height: float, font_path: str, lo: int = 4, hi: int = 400,
+    font_variation: str | None = None,
 ) -> int:
     """Binary-search the point size whose rendered cap height matches.
 
@@ -1101,7 +1167,7 @@ def fit_font_size(
     best, best_err = lo, float("inf")
     while lo <= hi:
         mid = (lo + hi) // 2
-        bbox = _font(font_path, mid).getbbox(probe_text)
+        bbox = _font(font_path, mid, font_variation).getbbox(probe_text)
         height = (bbox[3] - bbox[1]) if bbox else 0
         err = abs(height - target)
         if err < best_err:
@@ -1113,7 +1179,10 @@ def fit_font_size(
     return max(1, best)
 
 
-def solve_tracking(text: str, font_path: str, px_size: int, target_width: float) -> float:
+def solve_tracking(
+    text: str, font_path: str, px_size: int, target_width: float,
+    font_variation: str | None = None,
+) -> float:
     """Extra per-gap spacing that makes the run occupy its measured width,
     returned as an **em-relative fraction of px_size** — not absolute
     pixels.
@@ -1131,7 +1200,7 @@ def solve_tracking(text: str, font_path: str, px_size: int, target_width: float)
     """
     if len(text) < 2:
         return 0.0
-    natural = font_measure_width(text, font_path, px_size, 0.0)
+    natural = font_measure_width(text, font_path, px_size, 0.0, font_variation)
     gaps = len(text) - 1
     tracking_px = (target_width - natural) / gaps
     tracking_em = tracking_px / px_size
@@ -1174,18 +1243,38 @@ def solve_horizontal_scale(
     return float(np.clip(target_width / natural_width, min_scale, max_scale))
 
 
-def font_measure_width(text: str, font_path: str, px_size: int, tracking_px: float) -> float:
+def font_measure_width(
+    text: str, font_path: str, px_size: int, tracking_px: float,
+    font_variation: str | None = None,
+) -> float:
     """Advance width of ``text`` at ``tracking_px`` **absolute pixels**
     of extra per-gap spacing — the renderer's own measurement, so fitting
     and drawing can never disagree. (Absolute pixels here, deliberately
     different from :class:`TextStyle`'s em-relative ``tracking`` — see
     :func:`solve_tracking`; every caller of this function either passes
     ``0.0``, where the unit is moot, or converts explicitly.)"""
-    font = _font(font_path, px_size)
+    font = _font(font_path, px_size, font_variation)
     if not text:
         return 0.0
     width = sum(font.getlength(ch) for ch in text)
     return float(width + tracking_px * (len(text) - 1))
+
+
+def _fit_dimensions(
+    text: str, along: float, across: float, font_path: str, font_variation: str | None = None,
+) -> tuple[int, float, float, float]:
+    """px_size/tracking/width_scale for ``font_path`` against one run's
+    own measured (along, across) — plus how much of ``along`` the
+    result still overflows by, so a caller (fit_style) can compare
+    candidates without re-deriving it. Factored out of fit_style itself
+    so trying the condensed fallback is a second call with a different
+    font, not a second copy of this same three-line solve."""
+    px_size = fit_font_size(text, across, font_path, font_variation=font_variation)
+    tracking = solve_tracking(text, font_path, px_size, along, font_variation)
+    natural_tracked = font_measure_width(text, font_path, px_size, tracking * px_size, font_variation)
+    width_scale = solve_horizontal_scale(natural_tracked, along)
+    overflow = (natural_tracked * width_scale) / max(1.0, along)
+    return px_size, tracking, width_scale, overflow
 
 
 def fit_style(
@@ -1210,10 +1299,29 @@ def fit_style(
         image, bbox, angle_deg, other_boxes=other_boxes, expected_glyphs=len(text)
     )
 
-    px_size = fit_font_size(text, across, font_path)
-    tracking = solve_tracking(text, font_path, px_size, along)
-    natural_tracked = font_measure_width(text, font_path, px_size, tracking * px_size)
-    width_scale = solve_horizontal_scale(natural_tracked, along)
+    px_size, tracking, width_scale, overflow = _fit_dimensions(text, along, across, font_path)
+    font_variation = None
+
+    # The regular candidate still doesn't fit even after solve_tracking
+    # and solve_horizontal_scale both hit their own compression floors
+    # (see _CONDENSED_FONT_CANDIDATES' own note for the three real
+    # dimension numbers — 118-154% overflow — that motivated this).
+    # Tried, not assumed: the condensed instance is only KEPT if it
+    # measurably improves on the regular candidate for THIS text, since
+    # a short string with plenty of room never needs it and a
+    # genuinely-too-long string (a lexicon correction that expanded an
+    # abbreviation, say) may overflow on both regardless.
+    if overflow > _WIDTH_OVERFLOW_TOLERANCE:
+        condensed_path = _resolve_condensed_font()
+        if condensed_path is not None:
+            c_px_size, c_tracking, c_width_scale, c_overflow = _fit_dimensions(
+                text, along, across, condensed_path, _CONDENSED_VARIATION
+            )
+            if c_overflow < overflow:
+                font_path, px_size, tracking, width_scale = (
+                    condensed_path, c_px_size, c_tracking, c_width_scale
+                )
+                font_variation = _CONDENSED_VARIATION
 
     return TextStyle(
         font_path=font_path,
@@ -1224,4 +1332,5 @@ def fit_style(
         cap_height_px=across,
         ink_along_px=along,
         width_scale=width_scale,
+        font_variation=font_variation,
     )

@@ -90,6 +90,8 @@ def _draw_string(
     width automatically, with nothing further to keep in sync.
     """
     font = ImageFont.truetype(style.font_path, max(1, px_size * scale))
+    if style.font_variation is not None:
+        font.set_variation_by_name(style.font_variation)
     track = tracking_em * px_size * scale
 
     widths = [font.getlength(ch) for ch in text]

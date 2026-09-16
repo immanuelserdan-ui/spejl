@@ -222,8 +222,16 @@ def test_a_run_still_oversized_after_shrinking_is_flagged_as_a_warning(tmp_path)
     src = tmp_path / "plan.png"
     cv2.imwrite(str(src), img)
 
+    # x0=151, not 148: style/metrics.py now also tries a condensed
+    # font (Bahnschrift's "Condensed" instance, on systems that have
+    # it — see fit_style's own note) before giving up, which rescued
+    # the original, slightly wider box down to a mere 'fit-shrunk'.
+    # Narrower still keeps real, measurable ink inside the box (one
+    # px narrower than this and measure_ink_extent finds none at all,
+    # dropping the run entirely) while staying too tight for either
+    # font to close, which is what this test is actually about.
     tiny_box = Detection(
-        text="Kok", quad=((148, 192), (162, 192), (162, 204), (148, 204)), conf=0.9
+        text="Kok", quad=((151, 192), (162, 192), (162, 204), (151, 204)), conf=0.9
     )
     backend = _FixedBackend([tiny_box], base_size=(300, 400))
 

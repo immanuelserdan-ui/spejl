@@ -599,8 +599,10 @@ def _snap_cluster_to_median(cluster: list[MirroredRun]) -> None:
         if run.style.px_size == median:
             continue
         old = run.style
-        tracking = solve_tracking(run.text, old.font_path, median, old.ink_along_px)
-        natural_tracked = font_measure_width(run.text, old.font_path, median, tracking * median)
+        tracking = solve_tracking(run.text, old.font_path, median, old.ink_along_px, old.font_variation)
+        natural_tracked = font_measure_width(
+            run.text, old.font_path, median, tracking * median, old.font_variation
+        )
         width_scale = solve_horizontal_scale(natural_tracked, old.ink_along_px)
 
         # Guard against exactly the failure this feature's own regression

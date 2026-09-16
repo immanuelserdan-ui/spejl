@@ -579,7 +579,16 @@ def _correct_text_fidelity(ctx: QAContext, violation: Violation) -> bool:
         for candidate in _candidate_fonts(bold):
             if not Path(candidate).exists() or _font_covers(candidate, run.text):
                 continue
-            _redraw_run(ctx, i, replace(run.style, font_path=candidate), ctx.targets[i])
+            # font_variation cleared, not carried over: it names a
+            # variable-font instance specific to whatever font_path
+            # this run was on before (e.g. Bahnschrift's "Condensed" —
+            # see style/metrics.py's _CONDENSED_FONT_CANDIDATES), and
+            # `candidate` here is a completely different font with no
+            # reason to share that instance name — PIL's own
+            # set_variation_by_name would raise on a font that doesn't
+            # have it.
+            new_style = replace(run.style, font_path=candidate, font_variation=None)
+            _redraw_run(ctx, i, new_style, ctx.targets[i])
             return True
         return False  # no available font covers this text — not locally fixable
 

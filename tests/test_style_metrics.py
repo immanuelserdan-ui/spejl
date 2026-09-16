@@ -4,13 +4,19 @@ degenerate boxes and pathological text, not the clean synthetic case.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import cv2
 import numpy as np
 import pytest
 
 from spejl.style.metrics import (
+    _CONDENSED_FONT_CANDIDATES,
+    _fit_dimensions,
     _reads_vertically,
+    _resolve_condensed_font,
     fit_font_size,
+    fit_style,
     measure_ink_center,
     measure_ink_extent,
     resolve_font,
@@ -442,3 +448,88 @@ def test_a_glyph_fused_with_an_edge_touching_wall_is_clipped_not_dropped():
     # Width now reflects the fused component's contribution too, not
     # just the 3 unambiguous letters (which alone would measure ~55px).
     assert along > 80.0
+
+
+# ---------------------------------------------------------------------------
+# Condensed-font fallback
+# ---------------------------------------------------------------------------
+
+
+def _bahnschrift_available() -> bool:
+    return _resolve_condensed_font() is not None
+
+
+@pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
+def test_resolve_condensed_font_finds_bahnschrift():
+    path = _resolve_condensed_font()
+    assert path in _CONDENSED_FONT_CANDIDATES
+    assert Path(path).exists()
+
+
+def test_resolve_condensed_font_returns_none_if_no_candidate_exists(monkeypatch):
+    import spejl.style.metrics as metrics
+
+    monkeypatch.setattr(metrics, "_CONDENSED_FONT_CANDIDATES", ("Z:/nonexistent/nope.ttf",))
+    assert metrics._resolve_condensed_font() is None
+
+
+@pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
+def test_fit_dimensions_condensed_needs_less_width_than_regular(font_path: str):
+    """The exact case this fallback exists for, reproduced directly
+    rather than only via a real file: a short digit string measured
+    into a box too narrow for the regular font at the matching cap
+    height, confirmed on three real dimension numbers from an actual
+    project plan (see the module's own note on _CONDENSED_FONT_CANDIDATES)."""
+    text, along, across = "2301", 57.0, 28.0
+    condensed_path = _resolve_condensed_font()
+
+    _px, _tr, _sc, regular_overflow = _fit_dimensions(text, along, across, font_path)
+    _px, _tr, _sc, condensed_overflow = _fit_dimensions(text, along, across, condensed_path, "Condensed")
+
+    assert regular_overflow > 1.15, "test fixture no longer reproduces genuine overflow"
+    assert condensed_overflow < regular_overflow
+    assert condensed_overflow <= 1.10
+
+
+@pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
+def test_fit_style_switches_to_condensed_only_when_it_helps(monkeypatch):
+    """A measured box tight enough that Arial needs the condensed
+    fallback picks it (and records which variation); an ordinary,
+    comfortably-sized box has no reason to and stays on the regular
+    candidate. Ink/extent measurement is monkeypatched to fixed, known
+    values (the same real 'along, across' as test_fit_dimensions_
+    condensed_needs_less_width_than_regular, one widened) — precisely
+    engineering a synthetic image through the full measure_ink_extent
+    pipeline to hit an exact pixel target is what test_protected_
+    regions.py's own tiny-box test already shows is fragile; fit_style's
+    OWN condensed-switching decision (not ink measurement, which has
+    its own tests elsewhere in this file) is what this test is about.
+    """
+    import spejl.style.metrics as metrics
+
+    monkeypatch.setattr(metrics, "measure_ink_and_paper", lambda *a, **k: ((0, 0, 0), (255, 255, 255)))
+
+    image = np.full((80, 200, 3), 255, np.uint8)
+    bbox = (10.0, 20.0, 67.0, 48.0)
+
+    monkeypatch.setattr(metrics, "measure_ink_extent", lambda *a, **k: (57.0, 28.0))
+    tight_style = fit_style(image, "2301", bbox, 0.0)
+    assert tight_style.font_variation == "Condensed"
+    assert tight_style.font_path == _resolve_condensed_font()
+
+    monkeypatch.setattr(metrics, "measure_ink_extent", lambda *a, **k: (200.0, 28.0))
+    roomy_style = fit_style(image, "2301", bbox, 0.0)
+    assert roomy_style.font_variation is None
+    assert roomy_style.font_path == resolve_font()
+
+
+def test_fit_style_condensed_unavailable_falls_back_unchanged(monkeypatch):
+    """No Bahnschrift on this system (or an injected absence) must not
+    change behaviour at all — just skip straight to today's outcome."""
+    import spejl.style.metrics as metrics
+
+    monkeypatch.setattr(metrics, "_CONDENSED_FONT_CANDIDATES", ())
+    image = np.full((80, 200, 3), 255, np.uint8)
+    style = metrics.fit_style(image, "2301", (10.0, 20.0, 67.0, 48.0), 0.0)
+    assert style.font_variation is None
+    assert style.font_path == resolve_font()
