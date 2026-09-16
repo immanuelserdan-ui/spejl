@@ -316,3 +316,64 @@ def test_gate_stops_within_max_iterations_on_an_unfixable_violation(font_path: s
     assert not report.passed
     assert report.iterations == 1, "an uncorrectable violation should stop the loop immediately"
     assert any(v.rule is Rule.SPATIAL_INTEGRITY for v in report.violations)
+
+
+def test_spatial_integrity_does_not_flag_geometry_erase_legitimately_removed(font_path: str):
+    """Regression: confirmed on a REAL plan (demo/test_angle_fix.png,
+    not a synthetic fixture), not a hypothetical. The exclusion zone
+    check_spatial_integrity used was built from a run's MEASURED INK
+    extent (_run_footprint) — correct for knowing where the RE-RENDERED
+    glyph sits, and deliberately tighter than the raw OCR box, since
+    fit_style/measure_ink_extent filter out padding and non-glyph
+    content from that raw box on purpose (style/metrics.py). But S5's
+    own erase (erase.clean.erase_text) wipes the WIDER raw OCR box
+    (run.bbox_src, dilated by 3px) — not the tighter measured extent —
+    so a real plan's own drawing content sitting in the GAP between the
+    two (inside the raw box, outside the measured one) is legitimately
+    erased by S5 and then misread as "missing" by a check that only
+    knew about the tighter box. Confirmed on the real file: erasing
+    '4504' correctly took a couple of real source pixels that sat
+    exactly in that gap, at the edge of a nearby diagonal wall line.
+
+    This constructs the same shape of case synthetically: bbox_src
+    genuinely wider than the run's own measured ink target, with a
+    short real drawing mark sitting in the gap between them, and
+    confirms erase_text really does remove it (so this isn't testing
+    an unreachable setup) before checking that check_spatial_integrity
+    no longer flags the loss.
+    """
+    from spejl.erase.clean import erase_text
+
+    plate = _plate()
+    # A short real drawing mark sitting where a raw OCR box would
+    # plausibly reach (a few px right of the measured ink) but a
+    # tighter, ink-only extent would not.
+    plate[195:205, 355:365] = 0
+    style = _style(font_path, 30)
+    center_src = (300.0, 200.0)
+    bbox_src = (240.0, 185.0, 370.0, 215.0)  # deliberately wider than the run's own ink
+    run = _FakeRun(text="1383", center_out=center_src, angle_out=0.0, bbox_src=bbox_src, style=style)
+
+    erased = erase_text(plate, [bbox_src])
+    # Sanity check the fixture is actually exercising the real gap this
+    # test is about: the mark must be gone from the erased plate, or
+    # this isn't testing what it claims to.
+    assert erased.image[195:205, 355:365].min() > 200, "test setup itself doesn't erase the mark — fixture is wrong"
+
+    canvas = erased.image.copy()
+    drawing_alpha = drawing_alpha_for(erased.image)
+    lines = np.zeros(plate.shape[:2], np.uint8)
+    natural = render_run(canvas=canvas.copy(), text="1383", center=center_src, angle_deg=0.0, style=style)
+    target = (natural.ink_width, natural.ink_height)
+    rendered = render_run(
+        canvas=canvas, text="1383", center=center_src, angle_deg=0.0, style=style,
+        target_size=target, linework_mask=lines, drawing_alpha=drawing_alpha,
+    )
+
+    ctx = QAContext(
+        canvas=canvas, plate=erased.image, source=plate, axis=Axis.VERTICAL,
+        runs=[run], targets=[target], rendered=[rendered],
+        drawing_alpha=drawing_alpha, linework_mask=lines,
+    )
+    violations = check_spatial_integrity(ctx)
+    assert violations == [], violations

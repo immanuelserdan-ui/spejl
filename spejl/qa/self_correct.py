@@ -203,6 +203,11 @@ _FOOTPRINT_PAD_PX = 12
 
 
 def _run_footprint(run: RunLike, target: tuple[float, float]) -> tuple[int, int, int, int]:
+    """The RE-RENDERED run's own footprint, in output space — what a
+    correction needs to know to erase-and-redraw (see _redraw_run).
+    Deliberately NOT what check_spatial_integrity excludes on its own;
+    see _erased_source_footprint for why those are two different boxes.
+    """
     cx, cy = run.center_out
     along, across = target
     half_w, half_h = (along, across) if abs(run.angle_out) <= 45 else (across, along)
@@ -211,6 +216,45 @@ def _run_footprint(run: RunLike, target: tuple[float, float]) -> tuple[int, int,
         int(cx - half_w / 2 - p), int(cy - half_h / 2 - p),
         int(cx + half_w / 2 + p), int(cy + half_h / 2 + p),
     )
+
+
+# Matches erase.clean.erase_text's own default dilate_px — the box the
+# S5 erase stage actually wipes is the raw OCR detection box (bbox_src),
+# floor/ceil'd and padded by this many pixels, NOT the tighter measured-
+# ink extent _run_footprint above is built from. The two routinely
+# differ: fit_style/measure_ink_extent deliberately filter OUT padding,
+# dash-noise and non-glyph content from a raw detection box to get an
+# accurate SIZE to re-render at (see style/metrics.py), which is exactly
+# right for that purpose and exactly wrong as a stand-in for "what did
+# S5 actually erase" — the erased area is bigger, by design and by a
+# confirmed amount, not a rounding difference.
+_ERASE_DILATE_PX = 3
+
+
+def _erased_source_footprint(run: RunLike, w: int, h: int, axis: Axis) -> tuple[int, int, int, int]:
+    """The box S5 actually wiped, mapped into output space — what
+    check_spatial_integrity needs to exclude, and _run_footprint above
+    does not cover.
+
+    Confirmed as a real, reachable false positive, not a theoretical
+    one: on a genuine real plan (not a synthetic fixture), erasing
+    '4504' correctly removed a couple of source pixels that sat inside
+    its own raw, dilated OCR box but outside its measured-ink footprint
+    — line_pixel_mask's own repair (erase/clean.py) only restores a
+    component that extends past the box by _MIN_LINE_EXTENSION_PX,
+    deliberately, so a short mark entirely inside the box (here: a
+    stray couple of source pixels, not real structural linework) is not
+    restored, by design. Checking the erased sheet against the
+    measured-ink-only exclusion then read the correctly-erased pixels
+    as "missing drawing geometry" — a false alarm about the CHECK's own
+    footprint, not a real loss: the S5 stage behaved exactly as
+    documented, it was the S8 gate that hadn't been told what S5
+    actually touches.
+    """
+    mirrored = M.mirror_bbox(run.bbox_src, w, h, axis)
+    x0, y0, x1, y1 = mirrored
+    p = _ERASE_DILATE_PX + 4  # + antialiasing margin, matching _FOOTPRINT_PAD_PX's own reasoning
+    return (int(x0 - p), int(y0 - p), int(x1 + p), int(y1 + p))
 
 
 def check_spatial_integrity(ctx: QAContext) -> list[Violation]:
@@ -238,8 +282,16 @@ def check_spatial_integrity(ctx: QAContext) -> list[Violation]:
 
     exclude = np.zeros((h, w), bool)
     for run, target in zip(ctx.runs, ctx.targets):
-        x0, y0, x1, y1 = _run_footprint(run, target)
-        exclude[max(0, y0):min(h, y1), max(0, x0):min(w, x1)] = True
+        # The union of both: what got RE-RENDERED on top (_run_footprint)
+        # and what S5 actually ERASED from the source to make room for it
+        # (_erased_source_footprint) — two different boxes (see the
+        # latter's own docstring for a confirmed, reachable case where
+        # they disagree), and either one alone under-excludes.
+        for x0, y0, x1, y1 in (
+            _run_footprint(run, target),
+            _erased_source_footprint(run, w, h, ctx.axis),
+        ):
+            exclude[max(0, y0):min(h, y1), max(0, x0):min(w, x1)] = True
     for region in ctx.protected:
         x0, y0, x1, y1 = (int(v) for v in M.mirror_bbox(region, w, h, ctx.axis))
         p = _FOOTPRINT_PAD_PX
