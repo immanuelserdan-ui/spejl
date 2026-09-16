@@ -20,14 +20,18 @@ from spejl.qa.self_correct import (
     Rule,
     SelfCorrectingQAGate,
     Violation,
+    _correct_clearance,
     _correct_layer_ordering,
     _correct_text_fidelity,
     _font_covers,
+    _ink_footprint,
+    _run_footprint,
+    check_clearance,
     check_layer_ordering,
     check_spatial_integrity,
     check_text_fidelity,
 )
-from spejl.render.text import drawing_alpha_for, render_run
+from spejl.render.text import drawing_alpha_for, render_run, linework_mask_for
 from spejl.style.metrics import TextStyle, resolve_font
 
 
@@ -59,6 +63,7 @@ class _FakeRun:
     angle_out: float
     bbox_src: tuple[float, float, float, float]
     style: TextStyle
+    kind: str = "dimension"  # not "room" by default — see check_clearance
 
 
 def _plate() -> np.ndarray:
@@ -316,6 +321,113 @@ def test_gate_stops_within_max_iterations_on_an_unfixable_violation(font_path: s
     assert not report.passed
     assert report.iterations == 1, "an uncorrectable violation should stop the loop immediately"
     assert any(v.rule is Rule.SPATIAL_INTEGRITY for v in report.violations)
+
+
+def _context_with_room_label(
+    font_path: str, center: tuple[float, float], text: str = "Bad", kind: str = "room"
+) -> tuple[QAContext, _FakeRun, tuple[float, float]]:
+    """Same shape as _context_with_one_run, but built to let the caller
+    place the run ON `_plate()`'s own line (y=130) deliberately — the
+    other fixture always sits well clear of it, which is exactly wrong
+    for testing whether a run overlapping real geometry gets flagged."""
+    plate = _plate()
+    style = _style(font_path)
+    run = _FakeRun(text=text, center_out=center, angle_out=0.0, bbox_src=(0, 0, 1, 1), style=style, kind=kind)
+
+    natural = render_run(canvas=plate.copy(), text=text, center=center, angle_deg=0.0, style=style)
+    target = (natural.ink_width, natural.ink_height)
+
+    canvas = plate.copy()
+    drawing_alpha = drawing_alpha_for(plate)
+    lines = linework_mask_for(plate, np.zeros(plate.shape[:2], np.uint8))
+    rendered = render_run(
+        canvas=canvas, text=text, center=center, angle_deg=0.0, style=style,
+        target_size=target, linework_mask=lines, drawing_alpha=drawing_alpha,
+    )
+    ctx = QAContext(
+        canvas=canvas, plate=plate, source=cv2.flip(plate, 1), axis=Axis.VERTICAL,
+        runs=[run], targets=[target], rendered=[rendered],
+        drawing_alpha=drawing_alpha, linework_mask=lines,
+    )
+    return ctx, run, target
+
+
+def test_clearance_passes_for_a_room_label_clear_of_geometry(font_path: str):
+    ctx, _run, _target = _context_with_room_label(font_path, center=(300.0, 60.0))
+    assert check_clearance(ctx) == []
+
+
+def test_clearance_catches_a_room_label_overlapping_the_line(font_path: str):
+    ctx, _run, _target = _context_with_room_label(font_path, center=(300.0, 130.0))
+    violations = check_clearance(ctx)
+    assert len(violations) == 1
+    assert violations[0].rule is Rule.CLEARANCE
+    assert violations[0].correctable
+    assert violations[0].measured > 0
+
+
+def test_clearance_does_not_flag_the_same_overlap_on_a_dimension(font_path: str):
+    """The corpus-validated exception this rule is deliberately scoped
+    around: a dimension number legitimately sits on its own line (see
+    the module docstring's '3306' case) — only kind=="room" is
+    checked. Same position as the room test above, and confirmed to
+    still genuinely overlap (hidden > 0) so this is testing the kind
+    scoping, not a coincidental non-overlap."""
+    ctx, _run, _target = _context_with_room_label(
+        font_path, center=(300.0, 130.0), text="1400", kind="dimension"
+    )
+    assert ctx.rendered[0].hidden > 0, "test setup doesn't actually overlap — fixture is wrong"
+    assert check_clearance(ctx) == []
+
+
+def test_correct_clearance_nudges_a_room_label_off_the_line(font_path: str):
+    ctx, run, _target = _context_with_room_label(font_path, center=(300.0, 130.0))
+    violation = check_clearance(ctx)[0]
+
+    progressed = _correct_clearance(ctx, violation)
+    assert progressed
+    assert ctx.rendered[0].hidden < violation.measured
+    assert run.center_out != (300.0, 130.0)
+    assert check_clearance(ctx) == []
+
+
+def test_correct_clearance_never_erases_into_a_neighbouring_run(font_path: str):
+    """Confirmed as a real bug, not a theoretical one: an earlier
+    version of this corrector rejected a candidate only when its OWN
+    ink collided with a neighbour — but _redraw_run erases its run's
+    whole PADDED footprint back to bare plate before drawing (see its
+    own docstring), unconditionally, so a nudge that only reached a
+    neighbour's padding (never its actual ink) still silently wiped
+    part of that neighbour's already-rendered glyph. On the golden
+    fixture this turned 'Entre' into 'Entrel' after an 8px nudge. This
+    puts a second run exactly where the room label's own unblocked
+    search would otherwise land (established by the test above) and
+    checks the correction's own erase box never reaches the
+    neighbour's real ink."""
+    ctx, run, target = _context_with_room_label(font_path, center=(300.0, 130.0))
+    violation = check_clearance(ctx)[0]
+
+    blocker_center = (300.0, 116.0)  # where the unblocked search lands
+    blocker = _FakeRun(
+        text="870", center_out=blocker_center, angle_out=0.0,
+        bbox_src=(0, 0, 1, 1), style=run.style, kind="dimension",
+    )
+    b_natural = render_run(canvas=ctx.plate.copy(), text="870", center=blocker_center, angle_deg=0.0, style=run.style)
+    b_target = (b_natural.ink_width, b_natural.ink_height)
+    b_rendered = render_run(
+        canvas=ctx.canvas, text="870", center=blocker_center, angle_deg=0.0, style=run.style,
+        target_size=b_target, linework_mask=ctx.linework_mask, drawing_alpha=ctx.drawing_alpha,
+    )
+    ctx.runs.append(blocker)
+    ctx.targets.append(b_target)
+    ctx.rendered.append(b_rendered)
+
+    _correct_clearance(ctx, violation)
+
+    bx0, by0, bx1, by1 = _ink_footprint(blocker, ctx.rendered[1])
+    ex0, ey0, ex1, ey1 = _run_footprint(run, target)  # what the correction actually erased
+    overlap = ex0 < bx1 and bx0 < ex1 and ey0 < by1 and by0 < ey1
+    assert not overlap, "correction erased into a neighbouring run's own ink"
 
 
 def test_spatial_integrity_does_not_flag_geometry_erase_legitimately_removed(font_path: str):

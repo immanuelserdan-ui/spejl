@@ -1,6 +1,6 @@
 """Stage S8 — the pre-save gate: check the finished sheet against Spejl's
-three non-negotiable invariants, correct what can be corrected locally,
-and refuse to save what can't.
+non-negotiable invariants, correct what can be corrected locally, and
+refuse to save what can't.
 
 Every other stage in this pipeline already enforces its own piece of
 these rules AT THE POINT of doing the work — S7 anchors on measured ink,
@@ -16,7 +16,7 @@ every run has been drawn — a page-wide geometry comparison against the
 source, or a "does layer ordering hold everywhere" sweep, aren't
 naturally expressed as a per-run check inside the S7 loop.
 
-The three rules, and how each is actually decided rather than asserted:
+The rules, and how each is actually decided rather than asserted:
 
 * **Spatial integrity** — every dark pixel belonging to the source
   drawing (not text) must survive, at its mirrored position, in the
@@ -46,6 +46,30 @@ The three rules, and how each is actually decided rather than asserted:
   rendering and looking for ink (see ``_font_covers`` for why that
   naive approach was tried and is wrong). Both are correctable within
   bounded, local retries — see ``_correct_text_fidelity``.
+* **Clearance** — a ROOM NAME must never overlap solid drawing geometry
+  at all (any nonzero ``RenderedRun.hidden``, not just the >50%
+  ``_MOSTLY_HIDDEN`` threshold render/text.py's own soft warning uses).
+  Deliberately scoped to ``kind == "room"`` and nothing else. This is
+  the second attempt at a proximity-style rule in this codebase — the
+  first (see render/text.py's own "proximity-based collision check"
+  comment, near its module docstring) was reverted after a fixed
+  pixel-distance margin flagged the clear majority of correctly-placed
+  DIMENSION numbers, which routinely and legitimately sit on or beside
+  their own dimension/witness line by drafting convention.
+
+  Checked directly against the real project corpus before shipping
+  this one, not just reasoned about: a dimension number can
+  legitimately sit directly on solid wall poché too — '3306' (three
+  separate real files) labels a diagonal wall's own length by sitting
+  squarely on it, 25-31% of its own ink hidden, an apparently common
+  convention for a wall segment with no room for an offset witness
+  line. A room name has no equivalent convention. Every one of
+  hundreds of correctly-placed room labels across that same corpus
+  measured exactly zero on this signal, and the one genuine exception
+  (a real, shipped user file — see ``_correct_clearance``) was a label
+  sitting close enough to its own wall for a corner to clip it, which
+  room-name placement never has a legitimate reason to do. Correctable
+  within a few bounded nudges away from the geometry it overlaps.
 
 What this stage deliberately does NOT do: re-run OCR against the
 rendered output to confirm a string reads back correctly. That check is
@@ -80,6 +104,7 @@ class Rule(str, Enum):
     SPATIAL_INTEGRITY = "spatial-integrity"
     LAYER_ORDERING = "layer-ordering"
     TEXT_FIDELITY = "text-fidelity"
+    CLEARANCE = "clearance"
 
 
 @dataclass(frozen=True)
@@ -136,6 +161,7 @@ class RunLike(Protocol):
     (pipeline.py is the caller of this one)."""
 
     text: str
+    kind: str  # "room" | "dimension" | "annotation" | "area" | "unknown" — see lexicon/snap.py
     center_out: tuple[float, float]
     angle_out: float
     bbox_src: tuple[float, float, float, float]
@@ -546,6 +572,225 @@ def _correct_text_fidelity(ctx: QAContext, violation: Violation) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Rule 4 — clearance (room names only — see the module docstring for why
+# this is scoped this tightly, and what was tried and rejected first)
+# ---------------------------------------------------------------------------
+
+
+def check_clearance(ctx: QAContext) -> list[Violation]:
+    violations: list[Violation] = []
+    for i, (run, rendered) in enumerate(zip(ctx.runs, ctx.rendered)):
+        if run.kind == "room" and rendered.hidden > 0:
+            violations.append(Violation(
+                Rule.CLEARANCE, i, "room-overlap",
+                f"{run.text!r} overlaps drawing geometry ({rendered.hidden:.0%} of its own ink "
+                "sits behind solid linework) — a room name should never touch a wall.",
+                rendered.hidden, 0.0, correctable=True,
+            ))
+    return violations
+
+
+# A room label's own centre nudged this many pixels, perpendicular to its
+# reading direction first (the axis a wall it's brushing is most likely
+# to sit across), then along it, each tried in both directions — bounded,
+# not a search: four small, mechanical steps, matching the same
+# "deterministic retry over a fixed set of alternatives" discipline every
+# other corrector in this module already follows. Confirmed sufficient
+# on the one real, shipped case this rule was built from (a 0.12%
+# overlap — a hairline clip, not a deep intrusion) without needing a
+# targeted, overlap-centroid-aware nudge direction; a future case this
+# doesn't resolve escalates rather than searching further, the same as
+# every other bounded corrector here.
+_CLEARANCE_NUDGE_PX = (4, 8, 14, 22)
+
+
+def _ink_footprint(run: RunLike, rendered: RenderedRun) -> tuple[int, int, int, int]:
+    """A run's own actual rendered ink extent, in output space — the
+    real thing a NEIGHBOUR's nudge candidate must stay clear of.
+
+    Deliberately tighter than ``_run_footprint``'s padded erase box:
+    that padding is this run's OWN erase margin (room for
+    _FOOTPRINT_PAD_PX of antialiasing around ITS ink), not extra
+    territory a neighbour is barred from approaching. Reusing the
+    padded box for both sides made the clearance corrector's own
+    bounding-box check reject every one of the 16 bounded nudges tried
+    for the golden fixture's own 'Bad' — it sits roughly 40-49px from
+    its nearest neighbours ('1400', '870'), comfortably clear of their
+    actual ink, but well inside the ~54px two padded 12px-margin boxes
+    would each need to stay apart, so the check was rejecting nudges
+    that never touched anything.
+    """
+    cx, cy = run.center_out
+    w, h = rendered.ink_width, rendered.ink_height
+    half_w, half_h = (w, h) if abs(run.angle_out) <= 45 else (h, w)
+    p = 2  # antialiasing margin only — matches _erased_source_footprint's own
+    return (
+        int(cx - half_w / 2 - p), int(cy - half_h / 2 - p),
+        int(cx + half_w / 2 + p), int(cy + half_h / 2 + p),
+    )
+
+
+def _correct_clearance(ctx: QAContext, violation: Violation) -> bool:
+    """Try every bounded nudge, keep whichever left the LEAST overlap —
+    not the first that reaches exactly zero, and never the original,
+    worst position.
+
+    That distinction is not cosmetic: confirmed on the golden fixture's
+    own 'Bad', a real case this rule's own first version got wrong. Its
+    best reachable nudge cut overlap from 9% to 0.65% (still nonzero —
+    a corner brushing a doorway threshold, not a clean miss) — a real,
+    worthwhile improvement no candidate reduced to a clean 0. Returning
+    False on "didn't reach exactly zero" alone made every one of those
+    16 genuinely-improving renders get thrown away for the ORIGINAL,
+    worst one, on the reasoning that if it's still going to report a
+    violation, it might as well be un-nudged — exactly backwards: a
+    label picked to minimise real overlap is a strictly better thing to
+    have saved, or to show a human for review, than the one picked to
+    maximise it.
+
+    Rejecting a candidate on ``RenderedRun.collided`` alone was tried
+    next and is ALSO wrong, confirmed the same way: ``collided`` is any
+    overlap with ``linework_mask``, and that mask is seeded with the
+    sheet's own real geometry before a single run is ever drawn onto it
+    (see ``render_run``'s own docstring) — so it is True the instant a
+    label so much as brushes a wall, which for a room name pinned in a
+    tight corner is every candidate in the bounded set, 'Bad' included.
+    Gating on it made the search reject its own best-known improvement
+    (0.65% hidden) right along with the genuinely bad ones, landing back
+    on the original 9% with nothing tried. `hidden` (measured against
+    ``drawing_alpha``, the sheet's real geometry alone, never mutated by
+    any run) is the wall signal this corrector is trying to shrink, and
+    is allowed to land anywhere from 9% down to 0 — a hairline clip is
+    exactly the kind of partial win this function exists to keep.
+
+    What genuinely needs rejecting is a candidate whose footprint reaches
+    another run's own territory at all — not just an ink-level overlap.
+    Confirmed on the same fixture, a DIFFERENT bug than the one above:
+    even after gating on ink collision alone (checked against a mask of
+    other runs' already-stamped ink, excluding real geometry),
+    'Entre'/'1400' still broke on the golden fixture's own round-trip
+    ('1400' read back as '400'). The cause is `_redraw_run` itself, not
+    this search: it erases its run's CURRENT footprint back to bare
+    plate before drawing (see its own docstring), unconditionally, over
+    the whole padded box — so a nudge that lands close enough for its
+    own footprint to overlap a neighbour's, even without either run's
+    actual ink ever touching, silently wipes the neighbour's ink where
+    the two boxes intersect. A subsequent pixel-collision check can't
+    catch this after the fact, because by the time it runs the damage
+    (erasing bytes of a neighbour's glyph) is already done. The only
+    safe fix is to never call `_redraw_run` for a candidate whose
+    footprint reaches another run's footprint in the first place —
+    `_footprint_clear_of_other_runs` below is a plain bounding-box
+    check, computed BEFORE any canvas mutation, exactly for that.
+    """
+    i = violation.run_index
+    if i is None:
+        return False
+    run = ctx.runs[i]
+    cx, cy = run.center_out
+    perpendicular = abs(run.angle_out) <= 45  # horizontal reading -> nudge vertically first
+
+    # Snapshots, restored before EVERY trial candidate, not just before
+    # the final pick — two separate accumulation bugs this guards
+    # against, both confirmed while building this corrector, not
+    # theoretical:
+    #
+    # * render_run stamps each attempt's own ink into linework_mask (by
+    #   design — see its own docstring), so without restoring it, an
+    #   EARLIER trial this same search already rejected leaves ghost
+    #   ink behind that can wrongly fail a LATER, genuinely clear
+    #   candidate's own collision check.
+    # * _redraw_run only clears the footprint at the run's CURRENT
+    #   center back to plate before drawing — never wherever a PREVIOUS
+    #   trial in this same search left its own ink, since that sits at
+    #   a different position now that center_out has moved again.
+    #   Without restoring the canvas too, every rejected trial position
+    #   stays visible on the final saved sheet as a stray, uncleared
+    #   copy of the glyph — confirmed: exactly this scattered a handful
+    #   of ghost 'Bad's across the golden fixture before this fix.
+    mask_before_search = ctx.linework_mask.copy()
+    canvas_before_search = ctx.canvas.copy()
+
+    # This run's OWN starting footprint, erased to bare plate in the
+    # restore baseline itself — not just left for whichever candidate's
+    # own _redraw_run happens to erase. _redraw_run only clears the box
+    # at the position it is ABOUT to draw (see its own docstring): a
+    # nudge that only partly overlaps where this run started (any step
+    # smaller than its own footprint) leaves the non-overlapping sliver
+    # of the ORIGINAL glyph sitting on the canvas, uncleared, right next
+    # to the freshly-drawn one. Confirmed as a real, reachable bug, not
+    # a theoretical one: on the golden fixture, nudging 'Entre' 8px left
+    # left an 8px-wide strip of its own original 'e' behind at the old
+    # right edge, which OCR read back as a stray extra letter
+    # ('Entre' -> 'Entrel' -> mis-snapped to 'Entré').
+    h, w = ctx.canvas.shape[:2]
+    sx0, sy0, sx1, sy1 = _run_footprint(run, ctx.targets[i])
+    sx0, sy0 = max(0, sx0), max(0, sy0)
+    sx1, sy1 = min(w, sx1), min(h, sy1)
+    canvas_before_search[sy0:sy1, sx0:sx1] = ctx.plate[sy0:sy1, sx0:sx1]
+
+    def _restore() -> None:
+        ctx.linework_mask[:] = mask_before_search
+        ctx.canvas[:] = canvas_before_search
+
+    # Every OTHER run's own actual ink extent, at its CURRENT (already-
+    # final — QA only ever runs after every run in the page has been
+    # placed) position — computed once, up front, since none of them
+    # move while this run's own search runs. Deliberately the tight
+    # _ink_footprint, not _run_footprint's own padded erase box — see
+    # _ink_footprint's docstring for why the padded box on BOTH sides
+    # rejects every candidate for a label with ordinary, safe clearance
+    # from its neighbours.
+    other_footprints = [
+        _ink_footprint(other, ctx.rendered[j]) for j, other in enumerate(ctx.runs) if j != i
+    ]
+
+    def _footprint_clear_of_other_runs(box: tuple[int, int, int, int]) -> bool:
+        # box is THIS run's padded erase box (what _redraw_run will
+        # actually wipe back to plate) — checked against every other
+        # run's tight ink box, not another padded one, so the check
+        # reflects what would really get erased, not two safety margins
+        # stacked against each other.
+        bx0, by0, bx1, by1 = box
+        for ox0, oy0, ox1, oy1 in other_footprints:
+            if bx0 < ox1 and ox0 < bx1 and by0 < oy1 and oy0 < by1:
+                return False
+        return True
+
+    best_hidden = violation.measured
+    best_offset = (0, 0)
+    for step in _CLEARANCE_NUDGE_PX:
+        offsets = (
+            [(0, -step), (0, step), (-step, 0), (step, 0)]
+            if perpendicular else
+            [(-step, 0), (step, 0), (0, -step), (0, step)]
+        )
+        for dx, dy in offsets:
+            run.center_out = (cx + dx, cy + dy)
+            if not _footprint_clear_of_other_runs(_run_footprint(run, ctx.targets[i])):
+                continue
+            _restore()
+            rendered = _redraw_run(ctx, i, run.style, ctx.targets[i])
+            if rendered.hidden < best_hidden:
+                best_hidden, best_offset = rendered.hidden, (dx, dy)
+            if rendered.hidden == 0:
+                return True  # canvas/mask already reflect this winning trial
+
+    _restore()
+    run.center_out = (cx + best_offset[0], cy + best_offset[1])
+    _redraw_run(ctx, i, run.style, ctx.targets[i])
+    # Reports "did this help", not "is it fully fixed" — the latter is
+    # what the next pass's check_clearance re-verifies. A genuine (if
+    # partial) reduction is worth another pass: it starts the SAME
+    # bounded nudge search again from this new, already-better
+    # position, which can reach a clean zero across a couple of passes
+    # that no single pass's fixed nudge set would have reached alone.
+    # Reporting "resolved" here on ANY improvement, instead, would let
+    # the outer loop accept the sheet with real overlap still on it.
+    return best_hidden < violation.measured
+
+
+# ---------------------------------------------------------------------------
 # The loop
 # ---------------------------------------------------------------------------
 
@@ -553,6 +798,7 @@ _CHECKERS: tuple[Callable[[QAContext], list[Violation]], ...] = (
     check_spatial_integrity,
     check_layer_ordering,
     check_text_fidelity,
+    check_clearance,
 )
 
 # Rule.SPATIAL_INTEGRITY has no entry, deliberately — see the module
@@ -561,6 +807,7 @@ _CHECKERS: tuple[Callable[[QAContext], list[Violation]], ...] = (
 _CORRECTORS: dict[Rule, Callable[[QAContext, Violation], bool]] = {
     Rule.LAYER_ORDERING: _correct_layer_ordering,
     Rule.TEXT_FIDELITY: _correct_text_fidelity,
+    Rule.CLEARANCE: _correct_clearance,
 }
 
 

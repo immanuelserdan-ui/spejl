@@ -68,9 +68,58 @@ LABELS: list[TextPlacement] = [
     TextPlacement("Køkken", 1600, 1500, 20, 0, "room"),
     TextPlacement("Stue", 5000, 2400, 20, 0, "room"),
     TextPlacement("Vær. 1", 1450, 5300, 20, 0, "room"),
-    TextPlacement("Entre", 3640, 6650, 15, 0, "room"),
+    # Not this room's own centre (3648, 6358) either, for the same
+    # reason 'Bad' wasn't: the "Entre -> Toilet" door's swing arc is an
+    # 800mm-radius quarter-circle centred at (4395, 7100), sweeping
+    # into Entre's own south-east corner (down to roughly x=3595,
+    # y=6300 at its tip) — the original (3640, 6650) sat only ~80mm
+    # outside that curve, close enough that the label's own rendered
+    # ink actually touched it (see qa/self_correct.py's
+    # Rule.CLEARANCE; confirmed as a real, reachable case, not a
+    # theoretical one — an 8px corrective nudge got the check to pass
+    # at 0% overlap while leaving the arc close enough that OCR still
+    # fused it with the label's own 'e' on the golden fixture's
+    # round-trip, misreading 'Entre' as 'Entrel'). Moved north-west,
+    # comfortably outside the arc's radius from its own centre instead
+    # of just past the letter of the check.
+    TextPlacement("Entre", 3550, 5750, 15, 0, "room"),
     TextPlacement("Toilet", 5230, 6150, 16, 0, "room"),
-    TextPlacement("Bad", 6650, 7050, 16, 0, "room"),
+    # Moved from the original (6650, 7050): that sat only 130mm from
+    # the '870' dimension line (y=7180), close enough that the label's
+    # own rendered ink actually overlapped it (see qa/self_correct.py's
+    # Rule.CLEARANCE) — unlike every OTHER room label here, which sits
+    # close to its own room's centre without incident. The room's own
+    # geometric centre (6660, 6710) is a worse spot, not a fix: it
+    # lands almost exactly on the '1400' dimension's OWN text anchor
+    # ((y0+y1)/2 = 6710, text_x = 6770 — see V_DIMS/
+    # _all_text_placements below), stacking two labels together instead
+    # of one label on a line. This corner of the room has real
+    # obstacles on three sides — the '1400' line at x=6900 (east), the
+    # '870' line at y=7180 (south), the "bad" door's swing arc (an
+    # 800mm-radius quarter-circle centred at (6075, 7100), reaching
+    # into the room's south-west) — so the position below sits west of
+    # the 1400 line/text, north of the 870 line, and outside the door
+    # arc's own radius.
+    #
+    # A single mirror is clean at any of a wide range of positions in
+    # this pocket. A ROUND trip (mirror the mirrored output again) is
+    # not: moving 'Bad' at all — to any of 60+ positions tried, this
+    # one included — perturbs the OCR-measured cap height of nearby
+    # dimension runs (fit_style's own ``other_boxes`` exclusion sees a
+    # different 'Bad' box at a different spot) just enough to
+    # occasionally flip which side of raster/pipeline.py's own
+    # _snap_consistent_sizes clustering tolerance a run like '870'
+    # lands on. That function's own docstring already documents this
+    # exact class of noise as real and confirmed on this fixture
+    # (a 25-30px spread even withOUT moving anything) — this is that
+    # same pre-existing fragility, not something introduced by moving
+    # this label, and not fixable by finding a smarter (x, y). Chosen
+    # empirically as the cleanest of many candidates tried: a clean
+    # single mirror, a clean two-pass round trip (no QA refusal on
+    # either pass), and the smallest residual round-trip misread
+    # ('870' -> 'A70', nothing else) of any position tried other than
+    # the original one this rule now correctly rejects.
+    TextPlacement("Bad", 6600, 6250, 16, 0, "room"),
     TextPlacement("H*", 300, 380, 13, 0, "annotation"),
 ]
 
