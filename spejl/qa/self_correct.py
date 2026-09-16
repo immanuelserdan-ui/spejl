@@ -73,23 +73,28 @@ The rules, and how each is actually decided rather than asserted:
 * **OCR confidence** — no run may carry an unresolved low-confidence,
   implausible, or confusable-substitution flag (S3/S4's own
   ``"low-confidence"``, ``"implausible"``, ``"annotation-confusable"``
-  codes — see raster/pipeline.py and lexicon/snap.py). This rule has
-  no corrector, deliberately, and for the same reason spatial integrity
-  has none: these flags exist because OCR was not sure what the SOURCE
-  drawing actually says, not because anything this pipeline drew is
-  wrong. There is no geometry to nudge or box to widen that fixes
-  uncertainty about what a character in the original document was —
-  the pipeline has already done the one safe automated thing it can
-  (a curated confusable substitution, in the one case where it applies,
-  itself flagged for confirmation rather than trusted outright). Every
-  one of these codes already carries its own "confirm manually" message
-  precisely because guessing wrong here means silently shipping an
-  incorrect dimension or label on what may be a real construction
-  document — the one class of mistake this gate exists to make
-  impossible to miss. Before this rule, that confirmation was only ever
-  a warning on an already-saved file; this makes it a save-blocking one,
-  so the human review the flag itself asks for actually has to happen
-  before the file exists.
+  codes — see raster/pipeline.py and lexicon/snap.py). Split two ways,
+  deliberately, not treated as one block-or-don't decision:
+
+  ``"low-confidence"`` and ``"annotation-confusable"`` ARE auto-
+  accepted (see ``_correct_ocr_confidence``) — in both cases S3/S4 has
+  already settled on the one string it's going to render, this stage
+  is only deciding whether to trust that already-made call, and there
+  is no second candidate to weigh it against. Accepting it is accepting
+  the pipeline's own best (and only) answer, the same category of move
+  every other corrector in this module makes — not a guess invented
+  here. ``"implausible"`` stays refused: it means NO lexicon entry, no
+  fold, no fuzzy hit, no confusable substitution matched AT ALL — there
+  is no "pipeline's own answer" behind that flag to accept, only the
+  raw OCR string with nothing grounding it. That is a materially
+  different, riskier act than the other two, on what may be a real
+  construction document, so it keeps escalating to a human the same as
+  spatial integrity does: there is no geometry to nudge or box to widen
+  that fixes not knowing what a character actually was, and this stage
+  will not invent an answer it has no basis for. An accepted flag is
+  renamed, not deleted, so it stays visible on the saved file's own
+  Review panel — accepted is not the same as never having been a close
+  call, and a human should still be able to see which reads were.
 
 What this stage deliberately does NOT do: re-run OCR against the
 rendered output to confirm a string reads back correctly. That check is
@@ -813,9 +818,7 @@ def _correct_clearance(ctx: QAContext, violation: Violation) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Rule 5 — OCR confidence (no corrector — see the module docstring for why
-# guessing at uncertain source text is exactly the mistake this rule exists
-# to make impossible to ship unreviewed)
+# Rule 5 — OCR confidence
 # ---------------------------------------------------------------------------
 
 # S3/S4's own flag codes for "OCR was not sure this is what the source
@@ -829,6 +832,13 @@ def _correct_clearance(ctx: QAContext, violation: Violation) -> bool:
 # abbreviation or diacritic fix), not a guess needing confirmation.
 _UNRESOLVED_CONFIDENCE_CODES = frozenset({"low-confidence", "implausible", "annotation-confusable"})
 
+# Which of those codes _correct_ocr_confidence is allowed to accept
+# automatically. Two of the three DO have a real answer already sitting
+# behind them — see the corrector's own docstring for why "low-confidence"
+# and "annotation-confusable" are safe to auto-accept and "implausible" is
+# not, and is therefore deliberately left out of this set.
+_AUTO_ACCEPTABLE_CONFIDENCE_CODES = frozenset({"low-confidence", "annotation-confusable"})
+
 
 def check_ocr_confidence(ctx: QAContext) -> list[Violation]:
     violations: list[Violation] = []
@@ -837,9 +847,52 @@ def check_ocr_confidence(ctx: QAContext) -> list[Violation]:
             if flag.code in _UNRESOLVED_CONFIDENCE_CODES:
                 violations.append(Violation(
                     Rule.OCR_CONFIDENCE, i, flag.code, flag.message,
-                    0.0, 1.0, correctable=False,
+                    0.0, 1.0, correctable=flag.code in _AUTO_ACCEPTABLE_CONFIDENCE_CODES,
                 ))
     return violations
+
+
+def _correct_ocr_confidence(ctx: QAContext, violation: Violation) -> bool:
+    """Accept the pipeline's own already-computed reading rather than
+    keep blocking on it — for the two codes where that reading genuinely
+    IS the best answer available, not a guess invented here.
+
+    ``"low-confidence"`` means OCR wasn't fully sure, but nothing else
+    changed: `run.text` is already the one string S3/S4 settled on, and
+    there is no second candidate this stage could compare it against —
+    accepting it is accepting the only answer that exists, not guessing
+    among several. ``"annotation-confusable"`` is the same shape: by the
+    time this flag exists, lexicon/snap.py has ALREADY substituted the
+    confusable annotation into `run.text` (see its own
+    ``_ANNOTATION_CONFUSABLES`` table) — the "correction" already
+    happened upstream; this only decides whether to trust it.
+
+    ``"implausible"`` is excluded from ``_AUTO_ACCEPTABLE_CONFIDENCE_CODES``
+    on purpose and stays refused: it means NOTHING matched — no exact
+    lexicon entry, no fold, no fuzzy hit, no confusable substitution —
+    so unlike the other two there is no "the pipeline's own best answer"
+    to accept here, only the raw, uninterpreted OCR string. Auto-
+    accepting that would be a materially different and riskier act than
+    the other two — trusting a read this pipeline has no lexicon
+    grounds to believe at all, on what may be a real construction
+    document — so this corrector still returns False for it and the
+    gate keeps refusing until a human looks.
+
+    Marks the flag accepted rather than deleting it — renamed to its own
+    ``-accepted`` code so `check_ocr_confidence` won't re-raise it on the
+    next pass, but still visible on `run.flags` (and therefore the
+    Review panel) afterward: accepted is not the same as never having
+    been uncertain, and a human scanning the saved file's own flags
+    should still be able to see exactly which reads were close calls.
+    """
+    if violation.kind not in _AUTO_ACCEPTABLE_CONFIDENCE_CODES:
+        return False
+    run = ctx.runs[violation.run_index]
+    for idx, flag in enumerate(run.flags):
+        if flag.code == violation.kind and flag.message == violation.message:
+            run.flags[idx] = replace(flag, code=f"{flag.code}-accepted")
+            return True
+    return False  # the flag this violation was built from is already gone
 
 
 # ---------------------------------------------------------------------------
@@ -854,10 +907,19 @@ _CHECKERS: tuple[Callable[[QAContext], list[Violation]], ...] = (
     check_ocr_confidence,
 )
 
-# Rule.SPATIAL_INTEGRITY and Rule.OCR_CONFIDENCE have no entry,
-# deliberately — see the module docstring for why each can only ever be
-# detected, not repaired, here.
+# Rule.SPATIAL_INTEGRITY has no entry, deliberately — see the module
+# docstring for why that rule can only ever be detected, not repaired,
+# here. Rule.OCR_CONFIDENCE DOES have one, but check_ocr_confidence
+# already marks an "implausible" violation correctable=False (see
+# _AUTO_ACCEPTABLE_CONFIDENCE_CODES) — the loop below skips calling any
+# corrector at all for those (see its own `if not v.correctable:
+# continue`), so they still escalate exactly as if this rule had no
+# entry here either, for that one code only. _correct_ocr_confidence's
+# own guard against "implausible" is therefore never actually reached
+# through the loop — kept anyway so the function is correct standalone,
+# not just correct because of a filter one call site up.
 _CORRECTORS: dict[Rule, Callable[[QAContext, Violation], bool]] = {
+    Rule.OCR_CONFIDENCE: _correct_ocr_confidence,
     Rule.LAYER_ORDERING: _correct_layer_ordering,
     Rule.TEXT_FIDELITY: _correct_text_fidelity,
     Rule.CLEARANCE: _correct_clearance,
