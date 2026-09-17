@@ -46,14 +46,13 @@ _BOLD_CANDIDATES = (
 # floors exist to prevent glyphs visually merging into a different,
 # misread character, a real regression this project already found and
 # fixed once; loosening them to chase width is not on the table).
-# When that happens today, render/text.py's own shrink-to-fit loop
-# still has to intervene, cutting px_size — and therefore the run's
-# CAP HEIGHT — purely to recover width room that was never really a
-# height problem. Confirmed on three real dimension numbers from an
-# actual project file, each independently: Arial needed 118-154% of
-# the numbers' own measured width even at both compression floors,
-# which is what pushed their rendered height down to 89-96% of
-# target.
+# When that happens, render/text.py's own shrink-to-fit loop still has
+# to intervene, cutting px_size — and therefore the run's CAP HEIGHT —
+# purely to recover width room that was never really a height problem.
+# Confirmed on three real dimension numbers from an actual project
+# file, each independently: Arial needed 118-154% of the numbers' own
+# measured width even at both compression floors, which is what
+# pushed their rendered height down to 89-96% of target.
 #
 # Bahnschrift ships as a standard font on every Windows 10/1709+
 # install (same trust level this module already extends to Arial —
@@ -62,13 +61,32 @@ _BOLD_CANDIDATES = (
 # this project holds redistribution rights to) and carries a genuine
 # width AXIS as a variable font, with "Condensed" (75% width) as one
 # of its own named instances — not a synthetic squeeze applied after
-# the fact, an actual narrower cut of the same typeface. Tried against
-# the same three real numbers: 98-102% of measured width at FULL,
-# uncompressed cap height — no shrink needed at all. Absent on
-# non-Windows systems; _resolve_condensed_font returns None there and
-# fit_style falls back to today's behaviour unchanged.
+# the fact, an actual narrower cut of the same typeface. Measured
+# against every classic AutoCAD/Revit shape-font TrueType conversion
+# actually installed on this project's own machine too (isocp, romans,
+# simplex, txt, monos — decorative title fonts, it turns out, wider
+# than Arial for plain digits, not narrower): Bahnschrift Condensed
+# was the only candidate that measured close to the real numbers' own
+# width at full, uncompressed height — 100.5% on average, against
+# 133-179% for every other font tried, Arial included.
+#
+# Deliberately still a per-run FALLBACK, kept only when it measurably
+# beats the regular candidate for THAT run — not fit_style's default
+# for every run, which was tried and reverted. Applied everywhere, it
+# does fix height for every dimension number, exactly as the numbers
+# above predict — and ALSO makes '870' undetectable by OCR outright on
+# this project's own golden fixture, a run that never had a width
+# problem to begin with. Condensed's lighter default weight and
+# narrower strokes are exactly what makes it fit better, and exactly
+# what an OCR model already working with a small, low-contrast run
+# needs least. Losing a run outright is a strictly worse outcome than
+# the height shortfall this fallback exists to fix, so it stays scoped
+# to runs that actually need it. Absent on non-Windows systems;
+# _resolve_condensed_font returns None there and fit_style falls back
+# to today's behaviour unchanged.
 _CONDENSED_FONT_CANDIDATES = ("C:/Windows/Fonts/bahnschrift.ttf",)
 _CONDENSED_VARIATION = "Condensed"
+_CONDENSED_VARIATION_BOLD = "Bold Condensed"
 
 # Mirrors render/text.py's own OVERFLOW_TOLERANCE (1.04) — kept as a
 # separate constant here, not imported, for the same reason
@@ -1265,10 +1283,12 @@ def _fit_dimensions(
 ) -> tuple[int, float, float, float]:
     """px_size/tracking/width_scale for ``font_path`` against one run's
     own measured (along, across) — plus how much of ``along`` the
-    result still overflows by, so a caller (fit_style) can compare
-    candidates without re-deriving it. Factored out of fit_style itself
-    so trying the condensed fallback is a second call with a different
-    font, not a second copy of this same three-line solve."""
+    result still overflows by. fit_style itself only ever needs the
+    first three (a single font decided up front, not compared against
+    an alternative per run — see its own comment); the overflow figure
+    is what let this module's OWN candidate search compare fonts
+    against each other in the first place, and what its test suite
+    still checks against real measured cases."""
     px_size = fit_font_size(text, across, font_path, font_variation=font_variation)
     tracking = solve_tracking(text, font_path, px_size, along, font_variation)
     natural_tracked = font_measure_width(text, font_path, px_size, tracking * px_size, font_variation)
@@ -1302,26 +1322,43 @@ def fit_style(
     px_size, tracking, width_scale, overflow = _fit_dimensions(text, along, across, font_path)
     font_variation = None
 
-    # The regular candidate still doesn't fit even after solve_tracking
-    # and solve_horizontal_scale both hit their own compression floors
-    # (see _CONDENSED_FONT_CANDIDATES' own note for the three real
-    # dimension numbers — 118-154% overflow — that motivated this).
-    # Tried, not assumed: the condensed instance is only KEPT if it
-    # measurably improves on the regular candidate for THIS text, since
-    # a short string with plenty of room never needs it and a
-    # genuinely-too-long string (a lexicon correction that expanded an
-    # abbreviation, say) may overflow on both regardless.
+    # Condensed was tried as the PRIMARY font for every run, not just
+    # this fallback — reverted, confirmed wrong by the same standard
+    # everything else in this module is held to: real evidence, not
+    # reasoning alone. Measured against the same real corpus this
+    # whole feature was built from, universal Condensed genuinely does
+    # fix height for every dimension number (matches the field
+    # comparison in this constant's own docstring) — and ALSO makes
+    # '870' undetectable by OCR outright on the project's own golden
+    # fixture, a run this module never touched before and had no
+    # problem to begin with. Losing a run entirely is a strictly worse
+    # outcome than the 4-11% height shortfall this whole feature exists
+    # to fix, so "every run, always" is off the table — Condensed's
+    # lighter default weight and narrower strokes are exactly what
+    # makes it fit better, and exactly what an OCR model already
+    # struggling with a small run's low contrast needs least.
+    #
+    # Kept as the narrow, evidence-scoped fix it started as: tried only
+    # when the regular candidate genuinely doesn't fit even after
+    # solve_tracking and solve_horizontal_scale both hit their own
+    # compression floors (see their docstrings — both exist to prevent
+    # glyphs visually merging into a different, misread character, a
+    # real regression this project already found and fixed once), and
+    # kept only if it's a measured improvement for THAT run — never
+    # applied to a run with no width problem to solve in the first
+    # place, which is exactly the class '870' turned out to belong to.
     if overflow > _WIDTH_OVERFLOW_TOLERANCE:
         condensed_path = _resolve_condensed_font()
         if condensed_path is not None:
+            c_variation = _CONDENSED_VARIATION_BOLD if bold else _CONDENSED_VARIATION
             c_px_size, c_tracking, c_width_scale, c_overflow = _fit_dimensions(
-                text, along, across, condensed_path, _CONDENSED_VARIATION
+                text, along, across, condensed_path, c_variation
             )
             if c_overflow < overflow:
                 font_path, px_size, tracking, width_scale = (
                     condensed_path, c_px_size, c_tracking, c_width_scale
                 )
-                font_variation = _CONDENSED_VARIATION
+                font_variation = c_variation
 
     return TextStyle(
         font_path=font_path,

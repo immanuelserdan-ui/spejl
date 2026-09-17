@@ -475,11 +475,12 @@ def test_resolve_condensed_font_returns_none_if_no_candidate_exists(monkeypatch)
 
 @pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
 def test_fit_dimensions_condensed_needs_less_width_than_regular(font_path: str):
-    """The exact case this fallback exists for, reproduced directly
-    rather than only via a real file: a short digit string measured
-    into a box too narrow for the regular font at the matching cap
-    height, confirmed on three real dimension numbers from an actual
-    project plan (see the module's own note on _CONDENSED_FONT_CANDIDATES)."""
+    """The exact case Condensed was chosen as fit_style's PRIMARY font
+    for, reproduced directly rather than only via a real file: a short
+    digit string measured into a box too narrow for the regular font
+    at the matching cap height, confirmed on three real dimension
+    numbers from an actual project plan (see the module's own note on
+    _CONDENSED_FONT_CANDIDATES)."""
     text, along, across = "2301", 57.0, 28.0
     condensed_path = _resolve_condensed_font()
 
@@ -493,17 +494,20 @@ def test_fit_dimensions_condensed_needs_less_width_than_regular(font_path: str):
 
 @pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
 def test_fit_style_switches_to_condensed_only_when_it_helps(monkeypatch):
-    """A measured box tight enough that Arial needs the condensed
-    fallback picks it (and records which variation); an ordinary,
-    comfortably-sized box has no reason to and stays on the regular
-    candidate. Ink/extent measurement is monkeypatched to fixed, known
-    values (the same real 'along, across' as test_fit_dimensions_
-    condensed_needs_less_width_than_regular, one widened) — precisely
-    engineering a synthetic image through the full measure_ink_extent
-    pipeline to hit an exact pixel target is what test_protected_
-    regions.py's own tiny-box test already shows is fragile; fit_style's
-    OWN condensed-switching decision (not ink measurement, which has
-    its own tests elsewhere in this file) is what this test is about.
+    """A box tight enough that Arial needs the condensed fallback picks
+    it (and records which variation); an ordinary, comfortably-sized
+    box has no reason to and stays on the regular candidate. Applying
+    Condensed to every run regardless — tried once — fixed height
+    everywhere but ALSO made '870' undetectable by OCR outright on the
+    project's own golden fixture (see fit_style's own comment); scoping
+    it back to "only when the regular candidate genuinely can't fit"
+    is what this test locks in. Ink/extent measurement is monkeypatched
+    to fixed, known values — precisely engineering a synthetic image
+    through the full measure_ink_extent pipeline to hit an exact pixel
+    target is what test_protected_regions.py's own tiny-box test
+    already shows is fragile; fit_style's OWN condensed-switching
+    decision (not ink measurement, which has its own tests elsewhere
+    in this file) is what this test is about.
     """
     import spejl.style.metrics as metrics
 
@@ -521,6 +525,19 @@ def test_fit_style_switches_to_condensed_only_when_it_helps(monkeypatch):
     roomy_style = fit_style(image, "2301", bbox, 0.0)
     assert roomy_style.font_variation is None
     assert roomy_style.font_path == resolve_font()
+
+
+@pytest.mark.skipif(not _bahnschrift_available(), reason="Bahnschrift not present on this system")
+def test_fit_style_uses_bold_condensed_variation_when_bold_requested(monkeypatch):
+    import spejl.style.metrics as metrics
+
+    monkeypatch.setattr(metrics, "measure_ink_and_paper", lambda *a, **k: ((0, 0, 0), (255, 255, 255)))
+    monkeypatch.setattr(metrics, "measure_ink_extent", lambda *a, **k: (57.0, 28.0))
+    image = np.full((80, 200, 3), 255, np.uint8)
+
+    style = fit_style(image, "2301", (10.0, 20.0, 67.0, 48.0), 0.0, bold=True)
+    assert style.font_variation == "Bold Condensed"
+    assert style.font_path == _resolve_condensed_font()
 
 
 def test_fit_style_condensed_unavailable_falls_back_unchanged(monkeypatch):
