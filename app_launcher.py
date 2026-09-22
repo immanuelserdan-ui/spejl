@@ -14,4 +14,8 @@ import sys
 from spejl.gui.__main__ import main
 
 if __name__ == "__main__":
+    if len(sys.argv) == 3 and sys.argv[1] == "--self-test":
+        from spejl.release_check import run
+
+        sys.exit(run(sys.argv[2]))
     sys.exit(main())

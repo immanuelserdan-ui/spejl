@@ -52,7 +52,12 @@ def _spans(path: Path) -> list[dict]:
         for line in block["lines"]:
             for span in line["spans"]:
                 if span["text"].strip():
-                    out.append({"text": span["text"], "bbox": span["bbox"], "dir": line["dir"]})
+                    out.append({
+                        "text": span["text"],
+                        "bbox": span["bbox"],
+                        "dir": line["dir"],
+                        "origin": span["origin"],
+                    })
     doc.close()
     return out
 
@@ -138,6 +143,20 @@ def test_vertical_dimension_still_reads_bottom_to_top(source_pdf: Path, tmp_path
     assert cx < PAGE_W - DIM_X + 5
 
 
+def test_rotated_text_uses_the_mirrored_baseline_origin(source_pdf: Path, tmp_path: Path):
+    """Vertical text must keep its exact wall offset after reflection.
+
+    An axis-aligned bbox centre includes font ascender/descender padding and
+    shifts the baseline sideways; the PDF origin does not.
+    """
+    out = tmp_path / "plan_mirrored_origin.pdf"
+    mirror_pdf(source_pdf, out, axis=Axis.VERTICAL)
+    source_dim = next(s for s in _spans(source_pdf) if s["text"] == "5155")
+    mirrored_dim = next(s for s in _spans(out) if s["text"] == "5155")
+    assert mirrored_dim["origin"][0] == pytest.approx(PAGE_W - source_dim["origin"][0], abs=0.1)
+    assert mirrored_dim["origin"][1] == pytest.approx(source_dim["origin"][1], abs=0.1)
+
+
 def test_horizontal_axis_mirror_keeps_the_same_reading_convention(source_pdf, tmp_path):
     """A top/bottom mirror moves the *position* of a vertical run just
     like a left/right mirror does, but the readability rule (build plan
@@ -173,22 +192,11 @@ def test_sidecar_reports_one_page_and_three_text_runs(source_pdf: Path, tmp_path
     assert doc.pages[0].flags == []  # no embedded images to flag
 
 
-def test_genuinely_diagonal_text_is_flagged_not_silently_rounded(tmp_path: Path):
-    """Regression: the module docstring used to claim diagonal text
-    "never fires against real input" — Route B's own fix history this
-    session confirmed otherwise (real dimension numbers following a
-    sloped wall, on this project's own real plans). Page.insert_text
-    still only rotates in quarter turns (the morph rotation path this
-    fix would need isn't implemented), but a span whose own true
-    direction gets rounded by more than a trivial float sliver must now
-    show up in the sidecar, not vanish silently.
-    """
+def test_genuinely_diagonal_text_keeps_its_mirrored_slope(tmp_path: Path):
+    """A slanted dimension stays slanted and readable after reflection."""
     doc = pymupdf.open()
     page = doc.new_page(width=PAGE_W, height=PAGE_H)
-    # A genuinely diagonal run (30 degrees off horizontal) -- pymupdf's
-    # own `morph` parameter is the only way to insert text at an
-    # arbitrary angle for this test fixture; production code doesn't
-    # use it (that's the whole limitation this test is confirming).
+    # A genuinely diagonal run (30 degrees off horizontal).
     pivot = pymupdf.Point(150, 150)
     mat = pymupdf.Matrix(1, 0, 0, 1, 0, 0).prerotate(30)
     page.insert_text((150, 150), "4381", fontsize=14, fontname="helv", morph=(pivot, mat), color=(0, 0, 0))
@@ -199,8 +207,12 @@ def test_genuinely_diagonal_text_is_flagged_not_silently_rounded(tmp_path: Path)
     out = tmp_path / "diagonal_mirrored.pdf"
     result = mirror_pdf(src, out, axis=Axis.VERTICAL)
 
-    flag_codes = {f.code for f in result.pages[0].flags}
-    assert "diagonal-text-rounded" in flag_codes
+    assert result.pages[0].flags == []
+    span = next(s for s in _spans(out) if s["text"] == "4381")
+    # Vertical reflection reverses the slope but preserves readable
+    # left-to-right traversal: +30° becomes -30° in Spejl's convention.
+    out_angle = -math.degrees(math.atan2(span["dir"][1], span["dir"][0]))
+    assert out_angle == pytest.approx(-30, abs=1.0)
 
 
 def test_hairline_stroke_survives_as_thin_not_thickened_to_1pt(tmp_path: Path):
@@ -244,8 +256,43 @@ def test_hairline_stroke_survives_as_thin_not_thickened_to_1pt(tmp_path: Path):
     mirrored = pymupdf.open(str(out))
     width = next(dwg["width"] for dwg in mirrored[0].get_drawings())
     mirrored.close()
-    assert width < 0.5, f"hairline was thickened to {width}pt"
-    assert width > 0.0, "hairline lost its stroke colour and became invisible"
+    # The content-stream route preserves the original PDF ``0 w`` operator
+    # exactly.  Unlike the former Shape reconstruction it does not need to
+    # approximate hairline semantics with a non-zero width.
+    assert width == 0.0, f"hairline was altered to {width}pt"
+
+
+def test_content_stream_retains_spacing_and_text_state(tmp_path: Path):
+    """The vector route must not replace CAD ``TJ`` spacing with a font fit."""
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    # Create the /helv resource, then replace the content with a compact
+    # CAD-style text object that uses character spacing, word spacing,
+    # horizontal scaling, text rise and a TJ kerning adjustment.
+    page.insert_text((1, 1), "x", fontsize=1, fontname="helv")
+    xref = page.get_contents()[0]
+    page.parent.update_stream(
+        xref,
+        b"BT /helv 12 Tf 0.5 Tc 1 Tw 90 Tz 2 Ts 1 0 0 1 50 250 Tm [(A) 120 ( B)] TJ ET",
+    )
+    src = tmp_path / "spacing.pdf"
+    doc.save(str(src))
+    doc.close()
+
+    out = tmp_path / "spacing_mirrored.pdf"
+    mirror_pdf(src, out, axis=Axis.VERTICAL)
+
+    import pikepdf
+    pdf = pikepdf.Pdf.open(out)
+    operators = [(str(op), operands) for operands, op in pikepdf.parse_content_stream(pdf.pages[0])]
+    pdf.close()
+    names = [name for name, _ in operators]
+    for operator in ("Tf", "Tc", "Tw", "Tz", "Ts", "TJ"):
+        assert operator in names
+    tj = next(operands[0] for name, operands in operators if name == "TJ")
+    assert str(tj[0]) == "A"
+    assert tj[1] == 120
+    assert str(tj[2]) == " B"
 
 
 def test_double_mirror_is_close_to_idempotent(source_pdf: Path, tmp_path: Path):

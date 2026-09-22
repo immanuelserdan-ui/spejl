@@ -25,11 +25,16 @@ class _FixedBackend:
     def __init__(self, detections: list[Detection], base_size: tuple[int, int]) -> None:
         self._detections = detections
         self._base_h, self._base_w = base_size
+        self._base_calls = 0
 
     def detect_and_recognise(self, image: np.ndarray) -> list[Detection]:
         h, w = image.shape[:2]
         if (h, w) != (self._base_h, self._base_w):
             return []
+        self._base_calls += 1
+        if self._base_calls > 1:
+            return [Detection(d.text, tuple((w-x,y) for x,y in d.quad),d.conf)
+                    for d in self._detections]
         return self._detections
 
 
@@ -49,7 +54,7 @@ def _make_source_and_mirror(tmp_path):
     h, w = flipped.shape[:2]
     mx0, my0, mx1, my1 = (int(v) for v in M.mirror_bbox(text_box, w, h, Axis.VERTICAL))
     flipped[my0:my1, mx0:mx1] = 255  # erase the (now-mirrored) old text
-    cv2.putText(flipped, "24", (mx0, my1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 2, cv2.LINE_AA)
+    cv2.putText(flipped, "42", (mx0, my1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 0, 0), 2, cv2.LINE_AA)
 
     backend = _FixedBackend(
         [Detection(text="42", quad=((20.0, 65.0), (95.0, 65.0), (95.0, 115.0), (20.0, 115.0)), conf=0.99)],

@@ -10,6 +10,7 @@ wrong next to untouched linework.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -1304,6 +1305,7 @@ def fit_style(
     angle_deg: float,
     bold: bool = False,
     other_boxes: list[tuple[float, float, float, float]] | None = None,
+    allow_condensed: bool = True,
 ) -> TextStyle:
     """Measure every number for one run — none are assumed.
 
@@ -1347,7 +1349,8 @@ def fit_style(
     # kept only if it's a measured improvement for THAT run — never
     # applied to a run with no width problem to solve in the first
     # place, which is exactly the class '870' turned out to belong to.
-    if overflow > _WIDTH_OVERFLOW_TOLERANCE:
+    numeric_run = bool(re.fullmatch(r"[0-9][0-9 .,:/\\-]*", text.strip()))
+    if overflow > _WIDTH_OVERFLOW_TOLERANCE and (allow_condensed or not numeric_run):
         condensed_path = _resolve_condensed_font()
         if condensed_path is not None:
             c_variation = _CONDENSED_VARIATION_BOLD if bold else _CONDENSED_VARIATION

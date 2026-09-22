@@ -1,0 +1,46 @@
+SPEJL - FULL OFFLINE WINDOWS INSTALLER
+
+Mirror floor-plan geometry while keeping text readable.
+
+INSTALL ON ANOTHER PC
+1. Copy Spejl-0.1.0-Windows-x64-Setup.exe to the other computer.
+2. Double-click the installer and follow the setup wizard.
+3. Open Spejl from the Start menu or desktop shortcut.
+
+The installer includes the complete application, Python runtime, Qt desktop
+interface, OCR model files, PDF/image libraries, and Microsoft runtime DLLs.
+Python, Microsoft Office, a GPU, and an internet connection are not required
+for installation or normal operation. No trial or feature restriction is added.
+
+TARGET COMPUTERS
+Windows 10 22H2 or Windows 11, with an Intel/AMD 64-bit processor.
+This installer does not target 32-bit Windows, Windows on ARM, macOS, or Linux.
+Allow at least 1 GB of free disk space for installation and additional space
+for your drawings and exports. Large drawings may need more memory.
+Installation is for your Windows account and does not require administrator
+rights. The default folder is %LOCALAPPDATA%\Programs\Spejl.
+
+USE
+Open a PDF, PNG, or JPEG floor plan, select the mirror direction, and run
+Mirror. Review the resulting drawing and any text/QA flags before exporting.
+OCR and font substitution can need manual review, particularly on scans.
+
+UPDATE / UNINSTALL
+Close Spejl before installing a newer version into the same folder.
+Remove it through Windows Settings > Apps > Installed apps > Spejl.
+Keep your drawings and exports in your Documents folder, outside the app's
+installation folder. The uninstaller removes the files installed by setup.
+
+SIGNATURE
+This build is not signed with a publisher certificate. Windows may display
+an unknown-publisher warning. Verify that your copy came from your trusted
+distributor; a SHA-256 checksum is provided alongside the installer.
+
+THIRD-PARTY COMPONENTS
+See THIRD-PARTY-NOTICES.txt and licenses/ for dependency versions, metadata,
+and available license texts. Their terms continue to apply to distribution.
+
+DIAGNOSTICS
+Support can run Spejl.exe --self-test <output-folder> to exercise the packaged
+PDF and raster/OCR pipelines. It creates sample files and self-test.json in
+that folder. This is a synthetic runtime check, not validation of your plans.

@@ -25,33 +25,19 @@
 #      to assume incorrectly extends to the other two.
 
 import os
-import sys
-from pathlib import Path
 
-from PyInstaller.utils.hooks import collect_data_files, get_package_paths
+from PyInstaller.utils.hooks import collect_data_files
 
 block_cipher = None
 
 rapidocr_datas = collect_data_files("rapidocr_onnxruntime", includes=["**/*.onnx", "**/*.yaml"])
-# Ship the redistributable runtime supplied by Qt. A developer PC may have
-# these in System32 already; a clean destination PC must not depend on that.
-qt_package = Path(get_package_paths("PySide6")[1])
-qt_runtime_binaries = [(str(path), ".") for path in qt_package.glob("*140*.dll")]
-python_runtime_binaries = [
-    (str(path), ".") for path in (Path(sys.base_prefix) / "DLLs").glob("lib*.dll")
-]
-explicit_runtime_binaries = qt_runtime_binaries + python_runtime_binaries
-for name in ("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll"):
-    if not (qt_package / name).is_file():
-        raise RuntimeError(f"Missing redistributable runtime: {name}")
 
 a = Analysis(
     ["app_launcher.py"],
     pathex=[],
-    binaries=explicit_runtime_binaries,
+    binaries=[],
     datas=[
         ("spejl/lexicon/da_dk.json", "spejl/lexicon"),
-        ("spejl/gui/assets/dynamic-konsept-spinning-mark.png", "spejl/gui/assets"),
         *rapidocr_datas,
     ],
     hiddenimports=[
@@ -73,23 +59,12 @@ a = Analysis(
 # unrelated ICU and Universal CRT DLLs for application dependencies and
 # bundle them at the app root.  They then shadow Windows' compatible system
 # DLLs and QtWidgets fails at startup with "procedure could not be found".
-# The build interpreter may itself live in that runtime. Keep its DLLs
-# and extension modules, including dependencies such as OpenSSL, while
-# excluding binaries from unrelated tooling folders.
+# Spejl does not use that runtime, so exclude anything resolved from it.
 _CODEX_RUNTIME_MARKERS = ("\\.cache\\codex-runtimes\\", "\\.codex\\tmp\\")
-_PYTHON_BASE = Path(sys.base_prefix).resolve()
 a.binaries = [
     binary for binary in a.binaries
     if not any(marker in str(binary[1]).lower() for marker in _CODEX_RUNTIME_MARKERS)
-    or str(binary[0]).lower().startswith("python")
-    or str(binary[0]).lower().endswith(".pyd")
-    or Path(binary[1]).resolve().is_relative_to(_PYTHON_BASE)
 ]
-# Prefer the interpreter/vendor's own runtime files over same-named DLLs
-# found on the build machine's PATH (notably OpenSSL from other tooling).
-runtime_names = {Path(source).name.lower() for source, _ in explicit_runtime_binaries}
-a.binaries = [binary for binary in a.binaries if str(binary[0]).lower() not in runtime_names]
-a.binaries += [(Path(source).name, source, "BINARY") for source, _ in explicit_runtime_binaries]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -98,15 +73,14 @@ exe = EXE(
     a.scripts,
     [],
     exclude_binaries=True,
-    name="Spejl",
-    icon="spejl/gui/assets/spejl-icon.ico",
+    name="Spejl-debug",
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,  # UPX-compressing onnxruntime's DLLs is a common source
                 # of false-positive AV flags on a freshly built exe;
                 # not worth the smaller download for an internal tool.
-    console=False,  # windowed app — no terminal behind it
+    console=True,   # diagnostic build
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
@@ -122,5 +96,5 @@ coll = COLLECT(
     strip=False,
     upx=False,
     upx_exclude=[],
-    name="Spejl",
+    name="Spejl-debug",
 )

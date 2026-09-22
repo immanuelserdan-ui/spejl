@@ -13,20 +13,17 @@ Full technical blueprint: [`docs/build-plan.html`](docs/build-plan.html)
 
 ## Status
 
-**Phase 1 (Route A — lossless vector mirroring) is built and tested.**
+**Route A handles vector PDFs and preserves image-bearing pages through a raster fallback.**
 Given a vector PDF (the common case for CAD-exported plans), Spejl
 reads each glyph run's exact position and font, discards it, mirrors
 the page's vector geometry, and re-inserts every string upright at its
-mirrored, ISO-convention-correct anchor — no OCR, no reconstruction,
-no loss.
+mirrored, ISO-convention-correct anchor — no OCR on vector-only pages,
+with font-substitution and diagonal-angle limitations. Pages containing scans or embedded images are rendered at 300 dpi and processed through Route B; the result warns that those pages lose vector editability.
 
 **Route B (raster PNG/JPEG, S1–S7) is built end-to-end and passing its
 own round-trip test:** mirror the golden fixture, then OCR the *output*
 and confirm every string reads back correctly at its mirrored position.
-100% text recall, 100% character accuracy, 100% orientation accuracy, no
-text drawn over linework, re-rendered type within ~2% of the source's
-measured ink size, and mirroring twice still comes back at 100% accuracy
-— see `tests/test_raster_pipeline.py`.
+The golden-fixture tests enforce text recall, character accuracy, orientation and geometry checks, including mirroring twice. These are fixture measurements, not a guarantee for arbitrary drawings — see `tests/test_raster_pipeline.py`.
 
 **The drawing outranks the type.** A mirrored sheet carries two kinds of
 content and they are not equally recoverable: a text run is
@@ -57,7 +54,7 @@ single test. See `tests/test_erase_clean.py`.
 of the pipeline's invariants at the point of doing the work; S8 is the
 independent check that the *finished, fully-composited* sheet actually
 satisfies them, run automatically before every save (`qa_gate=True` by
-default on `mirror_raster`). Three rules, checked against the real
+default on `mirror_raster`). Five structural/confidence rules, checked against the real
 output bytes rather than assumed from upstream stages having run
 correctly:
 
@@ -94,9 +91,9 @@ misread as missing geometry; the height-lock ceiling first copying
 `OVERFLOW_TOLERANCE`, the threshold for when to START shrinking, not
 the one for when a render is actually a problem — the golden fixture's
 own `2900`/`3200` land at a legitimate 105%, no shrink ever attempted).
-Adds about 4% to end-to-end mirror time on the golden fixture — under
+The structural gate originally added about 4% to end-to-end mirror time on the golden fixture — under
 40ms of the ~1.8s a full raster mirror already costs, dominated by OCR.
-See `spejl/qa/self_correct.py` and `tests/test_self_correct.py`.
+An additional output OCR pass now checks the intended wording before save. Missing, different or low-confidence readings produce `rendered-text-unconfirmed` review warnings; saving a flagged result does not certify its wording. The Verify button checks saved output wording and every differing pixel outside padded text exclusions. It reports uncertainty rather than claiming that all geometry or text is guaranteed correct. OCR agreement is not independent ground truth. See `spejl/qa/self_correct.py`, `spejl/qa/verify.py` and `tests/test_scan_regressions.py`.
 
 ```bash
 spejl mirror plan.png --axis v      # same CLI as the vector path

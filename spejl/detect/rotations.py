@@ -337,7 +337,7 @@ def detect_all_orientations(
 
     merged = _merge(candidates, iou_threshold, dropped_out=dropped_out)
     canonicalised = [_canonicalise_vertical(d) for d in merged]
-    return _resolve_ambiguous_tilts(canonicalised)
+    return _resolve_ambiguous_tilts(canonicalised, image)
 
 
 def _nearest_cardinal_and_deviation(angle_deg: float) -> tuple[float, float]:
@@ -367,7 +367,41 @@ def _nearest_cardinal_and_deviation(angle_deg: float) -> tuple[float, float]:
     return best_cardinal, best_dev
 
 
-def _resolve_ambiguous_tilts(detections: list[Detection]) -> list[Detection]:
+def _line_corroborates(det: Detection, image: np.ndarray) -> bool:
+    """Use nearby drawing edges as independent evidence for a numeric tilt.
+
+    Exclude the text box from the edge map so glyph strokes cannot validate
+    their own noisy OCR angle. Length and search radius scale with the run.
+    """
+    if not det.text.isdigit():
+        return False
+    x0, y0, x1, y1 = det.bbox
+    short, long = sorted((x1 - x0, y1 - y0))
+    pad = int(2 * short)
+    h, w = image.shape[:2]
+    left, top = max(0, int(x0) - pad), max(0, int(y0) - pad)
+    crop = image[top:min(h, int(y1) + pad), left:min(w, int(x1) + pad)]
+    if not crop.size:
+        return False
+    gray = cv2.cvtColor(crop, cv2.COLOR_BGR2GRAY) if crop.ndim == 3 else crop
+    edges = cv2.Canny(gray, 50, 150)
+    edges[max(0, int(y0)-top-3):int(y1)-top+4,
+          max(0, int(x0)-left-3):int(x1)-left+4] = 0
+    lines = cv2.HoughLinesP(edges, 1, np.pi / 1800, threshold=max(12, int(long / 3)),
+                            minLineLength=max(20, long * .6), maxLineGap=5)
+    if lines is None:
+        return False
+    for ax, ay, bx, by in lines.reshape(-1, 4):
+        angle = float(np.degrees(np.arctan2(-(by-ay), bx-ax)))
+        difference = abs((angle-det.angle_deg+90) % 180-90)
+        if difference <= 3.0:
+            return True
+    return False
+
+
+def _resolve_ambiguous_tilts(
+    detections: list[Detection], image: np.ndarray | None = None,
+) -> list[Detection]:
     """A moderate deviation from cardinal (between ``_ALWAYS_SNAP_DEG``
     and ``_UNAMBIGUOUS_TILT_DEG`` — see both constants' own comments)
     is trusted only when at least one OTHER detection on the SAME
@@ -412,6 +446,8 @@ def _resolve_ambiguous_tilts(detections: list[Detection]) -> list[Detection]:
 
     resolved = list(detections)
     for i, cardinal, _dev in ambiguous:
+        if image is not None and _line_corroborates(detections[i], image):
+            corroborated.add(i)
         if i not in corroborated:
             det = detections[i]
             resolved[i] = Detection(text=det.text, quad=det.quad, conf=det.conf, angle_deg=cardinal)

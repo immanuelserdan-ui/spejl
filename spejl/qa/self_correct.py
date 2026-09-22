@@ -96,15 +96,7 @@ The rules, and how each is actually decided rather than asserted:
   Review panel — accepted is not the same as never having been a close
   call, and a human should still be able to see which reads were.
 
-What this stage deliberately does NOT do: re-run OCR against the
-rendered output to confirm a string reads back correctly. That check is
-real and already exists — it is exactly what
-``tests/test_raster_pipeline.py``'s round-trip test does — but it loads
-an OCR model and runs three detection passes, which is a fine cost for
-a test suite and a bad one to pay on every single save. This gate
-checks what can be verified from geometry and font data alone, in
-milliseconds, on every mirror; the expensive full-fidelity check stays
-where it already lives.
+This structural gate does not rerun OCR itself. Its caller, mirror_raster, now performs a separate output-pixel wording check after structural correction. Missing, conflicting or uncertain readings remain explicit review flags instead of being treated as verified wording.
 """
 
 from __future__ import annotations

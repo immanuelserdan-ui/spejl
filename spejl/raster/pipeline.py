@@ -27,6 +27,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from pathlib import Path
+import re
 
 import cv2
 import numpy as np
@@ -36,6 +37,7 @@ from spejl.detect.rotations import _intersection, detect_all_orientations
 from spejl.erase.clean import erase_text
 from spejl.lexicon.snap import SnapResult, snap
 from spejl.models import Axis, Document, Flag, PageResult, Route
+from spejl.image_io import write_image
 from spejl.qa.self_correct import QAContext, QAGateFailure, run_qa_gate
 from spejl.render.text import RenderedRun, drawing_alpha_for, linework_mask_for, render_run
 from spejl.style.metrics import (
@@ -346,7 +348,14 @@ def mirror_raster(
             run_flags.append(Flag(code, result.warning, "warn"))
 
         other_boxes = [d.bbox for d in detections if d is not det]
-        style = fit_style(image, result.text, det.bbox, det.angle_deg, other_boxes=other_boxes)
+        style = fit_style(
+            image,
+            result.text,
+            det.bbox,
+            det.angle_deg,
+            other_boxes=other_boxes,
+            allow_condensed=not bool(re.fullmatch(r"[0-9][0-9 .,:/\\-]*", result.text.strip())),
+        )
         # The raw detection box's own centre is not necessarily where the
         # WORD itself centres — dash-noise from a crossing reference line
         # (or any other one-sided contamination measure_ink_extent already
@@ -506,7 +515,15 @@ def mirror_raster(
             # partially-rendered `flipped` array is never written to disk.
             raise QAGateFailure(report)
 
-    cv2.imwrite(str(output_path), flipped)
+    if qa_gate:
+        from spejl.qa.verify import check_rendered_text
+        expected = []
+        for run in runs:
+            x0, y0, x1, y1 = M.mirror_bbox(run.bbox_src, w, h, axis)
+            expected.append((run.text, (x0, y0, x1, y1)))
+        for issue in check_rendered_text(flipped, expected, backend):
+            flags.append(Flag("rendered-text-unconfirmed", issue, "warn"))
+    write_image(output_path, flipped)
 
     document.pages.append(
         PageResult(
@@ -585,6 +602,7 @@ def _snap_consistent_sizes(runs: list[MirroredRun]) -> None:
                 cluster = []
             cluster.append(run)
         _snap_cluster_to_median(cluster)
+
 
 
 _SNAP_MAX_OVERSHOOT = 1.20  # matches the size-fidelity gate's own worst-case ceiling

@@ -25,7 +25,8 @@ Three further things this module refuses to do, each of which would show:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+import re
 
 import cv2
 import numpy as np
@@ -146,9 +147,11 @@ def render_run(
     in.
     """
     px_size, tracking = style.px_size, style.tracking  # tracking: em-relative
+    width_scale = style.width_scale
+    numeric_run = bool(re.fullmatch(r"[0-9][0-9 .,:/\\-]*", text.strip()))
     shrunk = False
 
-    tile = _draw_string(text, style, px_size, tracking, SUPERSAMPLE)
+    tile = _draw_string(text, replace(style, width_scale=width_scale), px_size, tracking, SUPERSAMPLE)
 
     if target_size is not None:
         target_along = max(1.0, target_size[0])
@@ -175,11 +178,47 @@ def render_run(
             # glyph size the rest of the sheet is drawn at. Compared as
             # an em fraction throughout, so this stays meaningful as
             # px_size drops on later iterations.
-            if tracking > 0.02:
+            if numeric_run and width_scale > 0.76:
+                # Dimension strings are the strongest style cue on a plan.
+                # Preserve their measured cap height and spacing; if a
+                # substitute font is wider, compress its advance width
+                # instead of shrinking px_size (which made labels such as
+                # 1961 and 1383 visibly smaller than their host text).
+                width_scale = max(0.76, width_scale * 0.94)
+            elif tracking > 0.02:
                 tracking = max(0.0, tracking - max(0.02, tracking * 0.4))
             else:
                 px_size = max(1, px_size - 1)
-            tile = _draw_string(text, style, px_size, tracking, SUPERSAMPLE)
+            tile = _draw_string(
+                text, replace(style, width_scale=width_scale), px_size, tracking, SUPERSAMPLE
+            )
+
+        # The source measurement is the text's ink box, while the font
+        # renderer's tile is measured from its antialiased alpha bounds.
+        # Those two bounds can differ by several pixels after a font
+        # substitution (especially for short labels), leaving the output
+        # visibly narrower or wider even though the fit loop accepted it.
+        # Apply the remaining measured correction before downsampling.  Keep
+        # it deliberately bounded: this closes the small raster/font-metric
+        # gap without turning a genuinely different font into a visibly
+        # stretched typeface.
+        current_along = max(1.0, tile.width / SUPERSAMPLE)
+        current_across = max(1.0, tile.height / SUPERSAMPLE)
+        sx = target_along / current_along
+        sy = target_across / current_across
+        # PDF/CAD fonts often have materially different cap-height metrics
+        # from the fallback font used by the raster route.  This is most
+        # visible on short numeric labels along slanted walls: the measured
+        # source cap can be 80–90% of the fallback tile even though the
+        # baseline and angle are correct.  Correct the tile in its own
+        # (unrotated) frame before rotation, within a bounded range, so the
+        # rendered cap height matches the source without changing tracking or
+        # the label's wall-aligned orientation.
+        if 0.80 <= sx <= 1.20 and 0.80 <= sy <= 1.20:
+            corrected_w = max(1, int(round(tile.width * sx)))
+            corrected_h = max(1, int(round(tile.height * sy)))
+            if corrected_w != tile.width or corrected_h != tile.height:
+                tile = tile.resize((corrected_w, corrected_h), Image.LANCZOS)
 
     # Downsample to final size, then rotate. Rotating after downsampling
     # keeps the supersample cost linear and PIL's bicubic rotation is

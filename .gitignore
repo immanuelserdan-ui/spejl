@@ -11,3 +11,8 @@ debug/
 *.spejl.json
 .DS_Store
 .claude/
+Spejl-app/
+installer/payload/
+build-installer/
+dist-installer/
+releases/

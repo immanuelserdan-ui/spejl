@@ -31,7 +31,20 @@ def bgr_to_qpixmap(image: np.ndarray) -> QPixmap:
     return QPixmap.fromImage(qimg.copy())
 
 
-def load_preview(path: Path, dpi: int = 150) -> QPixmap | None:
+def pdf_page_count(path: Path) -> int:
+    """Return a PDF's page count for preview navigation only."""
+    if path.suffix.lower() != ".pdf":
+        return 1
+    import pymupdf
+
+    doc = pymupdf.open(str(path))
+    try:
+        return doc.page_count
+    finally:
+        doc.close()
+
+
+def load_preview(path: Path, dpi: int = 150, page_index: int = 0) -> QPixmap | None:
     """Render any Spejl-supported file to a preview pixmap, or None."""
     suffix = path.suffix.lower()
     if suffix == ".pdf":
@@ -42,7 +55,9 @@ def load_preview(path: Path, dpi: int = 150) -> QPixmap | None:
             if doc.page_count == 0:
                 return None
             zoom = dpi / 72.0
-            pix = doc[0].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
+            if not 0 <= page_index < doc.page_count:
+                return None
+            pix = doc[page_index].get_pixmap(matrix=pymupdf.Matrix(zoom, zoom))
             fmt = QImage.Format.Format_RGBA8888 if pix.alpha else QImage.Format.Format_RGB888
             qimg = QImage(pix.samples, pix.width, pix.height, pix.stride, fmt)
             return QPixmap.fromImage(qimg.copy())

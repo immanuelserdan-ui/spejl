@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 import numpy as np
+import cv2
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,35 @@ class RapidOcrBackend:
         for quad, text, conf in raw:
             if not str(text).strip():
                 continue
+            # A bounded second observation for a short uncertain reading.
+            # Keep its original geometry: crop detection is only evidence
+            # about wording, not a replacement page-coordinate box.
+            if float(conf) < .85 and 2 <= len(str(text).strip()) <= 5:
+                xs, ys = zip(*quad)
+                x0, y0 = max(0, int(min(xs))-12), max(0, int(min(ys))-12)
+                x1 = min(image.shape[1], int(max(xs))+12)
+                y1 = min(image.shape[0], int(max(ys))+12)
+                crop = image[y0:y1, x0:x1]
+                if crop.size:
+                    try:
+                        retry, _ = self._ocr(cv2.resize(crop, None, fx=2, fy=2))
+                    except Exception as exc:
+                        raise RuntimeError(
+                            f"OCR engine failed during crop reread ({type(exc).__name__}: {exc})."
+                        ) from exc
+                    if retry and len(retry) == 1:
+                        retry_quad, retry_text, retry_conf = retry[0]
+                        # Reject fragments or unrelated text caught in padding.
+                        rx = [p[0]/2+x0 for p in retry_quad]
+                        ry = [p[1]/2+y0 for p in retry_quad]
+                        inter = max(0, min(max(xs), max(rx))-max(min(xs), min(rx))) * max(
+                            0, min(max(ys), max(ry))-max(min(ys), min(ry)))
+                        area = max(1, (max(xs)-min(xs))*(max(ys)-min(ys)))
+                        if (len(str(retry_text).strip()) == len(str(text).strip())
+                                and float(retry_conf) > float(conf) and inter/area >= .8):
+                            # Keep the original uncertainty visible even when
+                            # the alternative crop offers a better reading.
+                            text = retry_text
             out.append(
                 Detection(
                     text=str(text).strip(),
