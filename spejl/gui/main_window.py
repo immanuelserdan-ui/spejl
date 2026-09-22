@@ -670,10 +670,10 @@ class MainWindow(QMainWindow):
 
     def _show_route_badge(self, route: Route | None) -> None:
         if route is Route.VECTOR:
-            self._route_badge.setText("Vector PDF — raster fallback for images")
+            self._route_badge.setText("Vector PDF — best accuracy; geometry and text stay editable")
             self._route_badge.setProperty("route", "vector")
         elif route is Route.RASTER:
-            self._route_badge.setText("Raster image — reconstructed")
+            self._route_badge.setText("Raster input — review text and geometry before saving")
             self._route_badge.setProperty("route", "raster")
         else:
             self._route_badge.hide()

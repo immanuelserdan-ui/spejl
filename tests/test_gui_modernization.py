@@ -55,5 +55,6 @@ def test_window_exposes_isolated_modern_controls(qapp):
         assert window._page_label.text() == "Single page"
         assert not window._previous_page_button.isEnabled()
         assert not window._next_page_button.isEnabled()
+        assert "Vector PDF" in window._drop_zone._subtitle.text()
     finally:
         window.close()

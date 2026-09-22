@@ -20,7 +20,7 @@ class DropZone(QFrame):
         super().__init__(parent)
         self.setAcceptDrops(True)
         self.setFrameShape(QFrame.Shape.StyledPanel)
-        self.setMinimumHeight(120)
+        self.setMinimumHeight(152)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setObjectName("dropZone")
 
@@ -32,8 +32,9 @@ class DropZone(QFrame):
         self._title = QLabel("Drop a plan here, or click to browse")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setWordWrap(True)
-        self._subtitle = QLabel("PDF · PNG · JPEG · TIFF · BMP")
+        self._subtitle = QLabel("Best accuracy: Vector PDF from Revit (Vector Processing)")
         self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._subtitle.setWordWrap(True)
         # Styled inline, not via an ancestor's ID-selector rule: DropZone
         # sets its own stylesheet on itself below (to redraw the dashed
         # border on drag-active), and Qt's cascade doesn't carry an
@@ -44,6 +45,11 @@ class DropZone(QFrame):
         layout.addWidget(self._icon)
         layout.addWidget(self._title)
         layout.addWidget(self._subtitle)
+        self._formats = QLabel("Also supported: PNG · JPEG · TIFF · BMP — review required")
+        self._formats.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self._formats.setWordWrap(True)
+        self._formats.setStyleSheet("color: #8CB3C0; font-size: 10px;")
+        layout.addWidget(self._formats)
 
         self._update_style(active=False)
 
@@ -84,7 +90,7 @@ class DropZone(QFrame):
         self.browse()
 
     def browse(self) -> None:
-        """Open the normal file picker; shared by click, onboarding, and shortcuts."""
+        """Open the normal file picker; shared by click and shortcuts."""
         exts = " ".join(f"*{s}" for s in SUPPORTED_SUFFIXES)
         path_str, _filter = QFileDialog.getOpenFileName(
             self, "Choose a floor plan", "", f"Floor plans ({exts});;All files (*)"
