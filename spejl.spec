@@ -37,7 +37,14 @@ rapidocr_datas = collect_data_files("rapidocr_onnxruntime", includes=["**/*.onnx
 # these in System32 already; a clean destination PC must not depend on that.
 qt_package = Path(get_package_paths("PySide6")[1])
 qt_runtime_binaries = [(str(path), ".") for path in qt_package.glob("*140*.dll")]
-python_runtime_binaries = [
+# PyInstaller detects the interpreter DLL during Analysis, but our
+# post-analysis runtime filtering may remove binaries supplied by Codex's
+# bundled Python. Include it explicitly so every one-folder build contains
+# the DLL the bootloader loads before Spejl can start.
+python_dll = Path(sys.base_prefix) / f"python{sys.version_info.major}{sys.version_info.minor}.dll"
+if not python_dll.is_file():
+    raise RuntimeError(f"Missing Python runtime DLL: {python_dll}")
+python_runtime_binaries = [(str(python_dll), ".")] + [
     (str(path), ".") for path in (Path(sys.base_prefix) / "DLLs").glob("lib*.dll")
 ]
 explicit_runtime_binaries = qt_runtime_binaries + python_runtime_binaries
