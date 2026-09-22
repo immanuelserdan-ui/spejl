@@ -99,6 +99,14 @@ An additional output OCR pass now checks the intended wording before save. Missi
 spejl mirror plan.png --axis v      # same CLI as the vector path
 ```
 
+### Public installer and updates
+
+Every push to `main` runs `.github/workflows/release.yml`. GitHub Actions
+builds the Windows installer and publishes it as a GitHub Release. Installed
+copies check the latest release in the background and offer the installer
+when a newer version is available. A commit becomes user-visible only after
+the complete installer build succeeds.
+
 Command line:
 `python -m spejl.cli mirror <file>` routes automatically — vector PDF
 takes Route A, raster PNG/JPEG takes Route B.

@@ -11,7 +11,7 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from PySide6.QtCore import QRectF, QTimer, QUrl, Qt
+from PySide6.QtCore import QRectF, QThread, QTimer, QUrl, Qt
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -40,6 +40,7 @@ from spejl.gui.imaging import load_preview
 from spejl.gui.document_session import DocumentSession
 from spejl.gui.job_controller import MirrorJobController
 from spejl.gui.review_model import summarize_document, summarize_verification
+from spejl.gui.update_checker import UpdateCheckWorker, UpdateInfo
 from spejl.gui.widgets import DropZone, ScaledImageLabel
 from spejl.gui.worker import MirrorWorker, VerifyWorker
 from spejl.models import Axis, Document, Route
@@ -134,6 +135,8 @@ class MainWindow(QMainWindow):
         self._syncing_viewport = False
         self._temp_dir = tempfile.TemporaryDirectory(prefix="spejl_gui_")
         self._document_session = DocumentSession()
+        self._update_thread: QThread | None = None
+        self._update_worker: UpdateCheckWorker | None = None
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -151,6 +154,7 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_preview_area(), stretch=1)
         outer.addWidget(content, stretch=1)
         self._install_shortcuts()
+        QTimer.singleShot(1500, self._check_for_updates)
 
     def _install_shortcuts(self) -> None:
         """Discoverable desktop conventions; each delegates to existing UI actions."""
@@ -159,6 +163,42 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._on_mirror_clicked)
         QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_mirrored_view)
         QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
+
+    def _check_for_updates(self) -> None:
+        if self._update_thread is not None:
+            return
+        self._update_thread = QThread(self)
+        self._update_worker = UpdateCheckWorker()
+        self._update_worker.moveToThread(self._update_thread)
+        self._update_thread.started.connect(self._update_worker.run)
+        self._update_worker.finished.connect(self._on_update_result)
+        self._update_worker.finished.connect(self._update_thread.quit)
+        self._update_thread.finished.connect(self._finish_update_check)
+        self._update_thread.start()
+
+    def _on_update_result(self, info: UpdateInfo | None) -> None:
+        if info is None:
+            return
+        box = QMessageBox(self)
+        box.setWindowTitle("Spejl update available")
+        box.setText(f"Spejl {info.version} is ready to install.")
+        box.setInformativeText(
+            "Download the installer to update Spejl. Your floor-plan files are not affected."
+        )
+        open_button = box.addButton("Open download page", QMessageBox.ButtonRole.AcceptRole)
+        box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
+        box.exec()
+        if box.clickedButton() is open_button:
+            target = info.download_url or info.release_url
+            QDesktopServices.openUrl(QUrl(target))
+
+    def _finish_update_check(self) -> None:
+        if self._update_thread is not None:
+            self._update_thread.deleteLater()
+        if self._update_worker is not None:
+            self._update_worker.deleteLater()
+        self._update_thread = None
+        self._update_worker = None
 
     # ------------------------------------------------------------------
     # Layout
