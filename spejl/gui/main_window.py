@@ -39,7 +39,6 @@ from PySide6.QtWidgets import (
 from spejl.gui.imaging import load_preview
 from spejl.gui.document_session import DocumentSession
 from spejl.gui.job_controller import MirrorJobController
-from spejl.gui.onboarding import OnboardingOverlay
 from spejl.gui.review_model import summarize_document, summarize_verification
 from spejl.gui.widgets import DropZone, ScaledImageLabel
 from spejl.gui.worker import MirrorWorker, VerifyWorker
@@ -321,7 +320,6 @@ class MainWindow(QMainWindow):
 
     def _build_preview_area(self) -> QWidget:
         container = QWidget()
-        self._preview_container = container
         layout = QVBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
 
@@ -392,11 +390,6 @@ class MainWindow(QMainWindow):
         # the window simply because it contains a zoomable image.
         QTimer.singleShot(0, self._equalize_preview_panes)
 
-        self._onboarding = OnboardingOverlay(container)
-        self._onboarding.open_requested.connect(self._drop_zone.browse)
-        self._onboarding.show()
-        QTimer.singleShot(0, self._position_onboarding)
-
         return container
 
     def _equalize_preview_panes(self) -> None:
@@ -410,12 +403,6 @@ class MainWindow(QMainWindow):
         self._equalize_preview_panes()
         self._sync_preview_scale()
         self._sync_source_viewport()
-        self._position_onboarding()
-
-    def _position_onboarding(self) -> None:
-        if hasattr(self, "_onboarding") and self._onboarding.isVisible():
-            inset = 48
-            self._onboarding.setGeometry(self._preview_container.rect().adjusted(inset, inset, -inset, -inset))
 
     def _update_page_navigation(self) -> None:
         session = self._document_session
@@ -639,7 +626,6 @@ class MainWindow(QMainWindow):
         self._output_path = None
         self._document_session.open(path)
         self._update_page_navigation()
-        self._onboarding.hide()
         self._drop_zone.set_file(path)
         # Not re-enabled while a job is still in flight: the worker
         # already running holds its OWN captured input/output paths

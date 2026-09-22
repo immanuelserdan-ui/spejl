@@ -1,8 +1,8 @@
 """Regression checks for isolated modern GUI layers.
 
-These tests intentionally avoid invoking the mirror engine.  They prove that
-the new controller, page navigation and onboarding layers do not need to
-modify protected rendering code to provide their features.
+These tests intentionally avoid invoking the mirror engine. They prove that
+the new controller and page navigation do not need to modify protected
+rendering code to provide their features.
 """
 
 from __future__ import annotations
@@ -52,7 +52,6 @@ def test_window_exposes_isolated_modern_controls(qapp):
         window.show()
         qapp.processEvents()
         assert window._cancel_button.isHidden()
-        assert window._onboarding.isVisible()
         assert window._page_label.text() == "Single page"
         assert not window._previous_page_button.isEnabled()
         assert not window._next_page_button.isEnabled()
