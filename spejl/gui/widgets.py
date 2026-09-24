@@ -15,6 +15,7 @@ class DropZone(QFrame):
     """Drag a plan in, or click to browse — the whole zone is a button."""
 
     file_chosen = Signal(Path)
+    files_chosen = Signal(list)
 
     def __init__(self, parent: QWidget | None = None) -> None:
         super().__init__(parent)
@@ -29,7 +30,7 @@ class DropZone(QFrame):
         self._icon = QLabel("\U0001F5CE")  # 🗎 — a plain document glyph, no colour dependency
         self._icon.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._icon.setStyleSheet("font-size: 28px;")
-        self._title = QLabel("Drop a plan here, or click to browse")
+        self._title = QLabel("Drop plans here, or click to browse")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setWordWrap(True)
         self._subtitle = QLabel("Best accuracy: Vector PDF from Revit (Vector Processing)")
@@ -57,6 +58,18 @@ class DropZone(QFrame):
         self._title.setText(path.name)
         self._subtitle.setText(str(path.parent))
 
+    def set_files(self, paths: list[Path]) -> None:
+        if len(paths) == 1:
+            self.set_file(paths[0])
+        elif paths:
+            self._title.setText(f"{len(paths)} plans uploaded")
+            self._subtitle.setText("Select a filename below to preview it")
+
+    def clear(self) -> None:
+        """Restore the empty-file prompt after clearing the current session."""
+        self._title.setText("Drop plans here, or click to browse")
+        self._subtitle.setText("Best accuracy: Vector PDF from Revit (Vector Processing)")
+
     def _update_style(self, active: bool) -> None:
         border = "#4FC3E0" if active else "#2B6479"
         self.setStyleSheet(
@@ -66,7 +79,7 @@ class DropZone(QFrame):
     # -- drag and drop -----------------------------------------------------
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:  # noqa: N802 (Qt override)
-        if event.mimeData().hasUrls() and self._first_supported_path(event):
+        if event.mimeData().hasUrls() and self._supported_paths(event):
             self._update_style(active=True)
             event.acceptProposedAction()
         else:
@@ -77,9 +90,9 @@ class DropZone(QFrame):
 
     def dropEvent(self, event: QDropEvent) -> None:  # noqa: N802
         self._update_style(active=False)
-        path = self._first_supported_path(event)
-        if path is not None:
-            self.file_chosen.emit(path)
+        paths = self._supported_paths(event)
+        if paths:
+            self.files_chosen.emit(paths)
             event.acceptProposedAction()
 
     def mousePressEvent(self, event) -> None:  # noqa: N802
@@ -92,19 +105,25 @@ class DropZone(QFrame):
     def browse(self) -> None:
         """Open the normal file picker; shared by click and shortcuts."""
         exts = " ".join(f"*{s}" for s in SUPPORTED_SUFFIXES)
-        path_str, _filter = QFileDialog.getOpenFileName(
-            self, "Choose a floor plan", "", f"Floor plans ({exts});;All files (*)"
+        path_strings, _filter = QFileDialog.getOpenFileNames(
+            self, "Choose floor plans", "", f"Floor plans ({exts});;All files (*)"
         )
-        if path_str:
-            self.file_chosen.emit(Path(path_str))
+        if path_strings:
+            self.files_chosen.emit([Path(path) for path in path_strings])
 
     @staticmethod
     def _first_supported_path(event) -> Path | None:
+        paths = DropZone._supported_paths(event)
+        return paths[0] if paths else None
+
+    @staticmethod
+    def _supported_paths(event) -> list[Path]:
+        paths: list[Path] = []
         for url in event.mimeData().urls():
             path = Path(url.toLocalFile())
             if path.suffix.lower() in SUPPORTED_SUFFIXES and path.is_file():
-                return path
-        return None
+                paths.append(path)
+        return paths
 
 
 class ScaledImageLabel(QLabel):
@@ -392,11 +411,11 @@ class ScaledImageLabel(QLabel):
             }
             delta = moves.get(event.key())
             if delta is not None:
-                # Guides and alignment feedback are always available. The
-                # snap routine only settles on a guide that this key press
-                # actually reaches or crosses, so nearby text never blocks
-                # ordinary fine movement.
-                self.text_nudged.emit(sorted(self._selected_text), *delta, True)
+                # Ordinary arrow movement is exact. Snap only on the explicit
+                # Alt+arrow gesture shown in the selection guidance; otherwise
+                # a nearby alignment guide can silently shorten a user's nudge.
+                snap_to_text = bool(event.modifiers() & Qt.KeyboardModifier.AltModifier)
+                self.text_nudged.emit(sorted(self._selected_text), *delta, snap_to_text)
                 event.accept()
                 return
         super().keyPressEvent(event)
