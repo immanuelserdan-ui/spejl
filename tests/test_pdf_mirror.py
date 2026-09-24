@@ -13,7 +13,11 @@ import pymupdf
 import pytest
 
 from spejl.models import Axis
-from spejl.vector.pdf_mirror import _rotate_param, mirror_pdf
+from spejl.vector.pdf_mirror import (
+    _rotate_param,
+    mirror_pdf,
+    text_drawing_overlap_findings,
+)
 
 PAGE_W, PAGE_H = 400.0, 300.0
 ROOM = pymupdf.Rect(40, 40, 240, 260)  # room occupies the LEFT side of the sheet
@@ -293,6 +297,29 @@ def test_content_stream_retains_spacing_and_text_state(tmp_path: Path):
     assert str(tj[0]) == "A"
     assert tj[1] == 120
     assert str(tj[2]) == " B"
+
+
+def test_text_drawing_overlap_findings_name_only_colliding_text(tmp_path: Path):
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    for x in (100, 150, 200):
+        page.draw_line((x, 40), (x, 260), color=(0, 0, 0), width=2)
+    for x, y, label in (
+        (94, 90, "First overlap"),
+        (144, 150, "Second overlap"),
+        (194, 210, "Third overlap"),
+        (280, 150, "Clear label"),
+    ):
+        page.insert_text((x, y), label, fontsize=12)
+    pdf = tmp_path / "overlap.pdf"
+    doc.save(pdf)
+    doc.close()
+
+    assert text_drawing_overlap_findings(pdf) == [
+        (1, "First overlap"),
+        (1, "Second overlap"),
+        (1, "Third overlap"),
+    ]
 
 
 def test_double_mirror_is_close_to_idempotent(source_pdf: Path, tmp_path: Path):

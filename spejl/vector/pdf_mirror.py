@@ -295,6 +295,46 @@ def selected_text_overlaps_drawing(
         document.close()
 
 
+def text_drawing_overlap_findings(pdf_path: Path) -> list[tuple[int, str]]:
+    """List visible PDF text runs whose glyph bounds intersect drawing geometry.
+
+    Each result is ``(one_based_page_number, text)``. Findings are deduplicated
+    per run even when a label crosses several wall or dimension segments.
+    """
+    return [
+        (page_index + 1, text)
+        for page_index, _run_index, text in text_drawing_overlap_runs(pdf_path)
+    ]
+
+
+def text_drawing_overlap_runs(pdf_path: Path) -> list[tuple[int, int, str]]:
+    """Return zero-based page and text-run indexes for every overlap.
+
+    The indexes let the GUI apply a correction to exactly the runs shown in
+    its overlap panel, including repeated labels and findings on other pages.
+    """
+    document = pymupdf.open(str(pdf_path))
+    findings: list[tuple[int, int, str]] = []
+    try:
+        for page_index, page in enumerate(document):
+            occupied = _drawing_element_rectangles(page)
+            for block in page.get_text("rawdict").get("blocks", []):
+                if block.get("type") == 1 and "bbox" in block:
+                    occupied.append(pymupdf.Rect(block["bbox"]))
+            if not occupied:
+                continue
+            for run_index, trace in enumerate(_trace_runs(page)):
+                box = pymupdf.Rect(trace["bbox"])
+                if not any(box.intersects(element) for element in occupied):
+                    continue
+                label = "".join(chr(char[0]) for char in trace["chars"]).strip()
+                if label:
+                    findings.append((page_index, run_index, label))
+        return findings
+    finally:
+        document.close()
+
+
 def _drawing_element_rectangles(page: pymupdf.Page) -> list[pymupdf.Rect]:
     """Return tight occupied rectangles for individual PDF path elements."""
     occupied: list[pymupdf.Rect] = []

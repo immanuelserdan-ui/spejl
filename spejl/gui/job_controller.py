@@ -50,7 +50,6 @@ class MirrorJobController(QObject):
         self.worker.started.connect(self._on_worker_started)
         self.worker.succeeded.connect(self._on_worker_succeeded)
         self.worker.failed.connect(self._on_worker_failed)
-        self.worker.start()
         return self.worker
 
     def request_cancel(self) -> None:

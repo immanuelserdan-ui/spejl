@@ -58,3 +58,28 @@ def test_window_exposes_isolated_modern_controls(qapp):
         assert "Vector PDF" in window._drop_zone._subtitle.text()
     finally:
         window.close()
+
+
+def test_text_nudging_only_snaps_when_alt_is_held(qapp):
+    from PySide6.QtCore import QRectF, Qt
+    from PySide6.QtTest import QTest
+    from spejl.gui.widgets import ScaledImageLabel
+
+    view = ScaledImageLabel()
+    view.set_text_regions([(0, QRectF(10, 10, 20, 12))], selected={0})
+    moves = []
+    view.text_nudged.connect(lambda *args: moves.append(args))
+    view.show()
+    view.setFocus()
+    qapp.processEvents()
+    try:
+        QTest.keyClick(view, Qt.Key.Key_Right)
+        QTest.keyClick(view, Qt.Key.Key_Right, Qt.KeyboardModifier.AltModifier)
+        QTest.keyClick(view, Qt.Key.Key_Right, Qt.KeyboardModifier.ShiftModifier)
+        assert moves == [
+            ([0], 1.0, 0.0, False),
+            ([0], 1.0, 0.0, True),
+            ([0], 5.0, 0.0, False),
+        ]
+    finally:
+        view.close()

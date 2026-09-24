@@ -1,13 +1,7 @@
-"""Screens 1 and 2 of the build plan's §06 UI flow, in one window:
-import on the left, before/after preview on the right. Screen 3
-(batch) is a CLI job (``spejl mirror plans/ --batch``), not a GUI one —
-see the build plan's rationale for why the CLI, not the app, is what a
-40-unit project actually runs.
-"""
+"""Multi-plan import, queued mirroring, and paired before/after review."""
 
 from __future__ import annotations
 
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -37,6 +31,7 @@ from PySide6.QtWidgets import (
 )
 
 from spejl.gui.imaging import load_preview
+from spejl.gui.batch_model import BatchEntry, mirrored_filename
 from spejl.gui.document_session import DocumentSession
 from spejl.gui.job_controller import MirrorJobController
 from spejl.gui.review_model import summarize_document, summarize_verification
@@ -132,11 +127,19 @@ class MainWindow(QMainWindow):
         self._diff_overlay_path: Path | None = None
         self._selected_text_indexes: set[int] = set()
         self._mirrored_zoom = 1.0
+        self._preview_dpi = 150
         self._syncing_viewport = False
         self._temp_dir = tempfile.TemporaryDirectory(prefix="spejl_gui_")
         self._document_session = DocumentSession()
         self._update_thread: QThread | None = None
         self._update_worker: UpdateCheckWorker | None = None
+        self._batch_entries: dict[Path, BatchEntry] = {}
+        self._batch_order: list[Path] = []
+        self._batch_queue: list[Path] = []
+        self._batch_axis: Axis | None = None
+        self._active_batch_path: Path | None = None
+        self._selecting_batch_item = False
+        self._clear_pending = False
 
         central = QWidget()
         self.setCentralWidget(central)
@@ -264,6 +267,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(subtitle)
 
         self._drop_zone = DropZone()
+        self._drop_zone.files_chosen.connect(self._on_files_chosen)
         self._drop_zone.file_chosen.connect(self._on_file_chosen)
         layout.addWidget(self._drop_zone)
 
@@ -297,7 +301,23 @@ class MainWindow(QMainWindow):
         self._status_label.setStyleSheet("color: #8CB3C0; font-size: 12px;")
         layout.addWidget(self._status_label)
 
-        flags_box = QGroupBox("Review")
+        uploaded_box = QGroupBox("Uploaded")
+        uploaded_layout = QVBoxLayout(uploaded_box)
+        self._uploaded_list = QListWidget()
+        self._uploaded_list.setAlternatingRowColors(True)
+        self._uploaded_list.currentItemChanged.connect(self._on_uploaded_item_selected)
+        uploaded_layout.addWidget(self._uploaded_list)
+        layout.addWidget(uploaded_box, stretch=1)
+
+        mirrored_box = QGroupBox("Mirrored")
+        mirrored_layout = QVBoxLayout(mirrored_box)
+        self._mirrored_list = QListWidget()
+        self._mirrored_list.setAlternatingRowColors(True)
+        self._mirrored_list.currentItemChanged.connect(self._on_mirrored_item_selected)
+        mirrored_layout.addWidget(self._mirrored_list)
+        layout.addWidget(mirrored_box, stretch=1)
+
+        flags_box = QGroupBox("Checks")
         flags_layout = QVBoxLayout(flags_box)
         self._review_summary = QLabel("Choose a plan to begin")
         self._review_summary.setStyleSheet("color: #9EE5F7; font-size: 12px; font-weight: 600;")
@@ -306,7 +326,12 @@ class MainWindow(QMainWindow):
         self._flags_list.setAlternatingRowColors(True)
         self._flags_list.itemClicked.connect(self._on_review_item_clicked)
         flags_layout.addWidget(self._flags_list)
-        layout.addWidget(flags_box, stretch=1)
+        self._flags_list.setMaximumHeight(85)
+        layout.addWidget(flags_box)
+        # The review/verification panel was removed from the primary workflow
+        # so the batch lists and Save As action remain easy to reach. Keep the
+        # widgets alive because their state is still used by verification code.
+        flags_box.hide()
 
         self._save_button = QPushButton("Save As…")
         self._save_button.setObjectName("saveButton")
@@ -335,6 +360,8 @@ class MainWindow(QMainWindow):
         self._view_diff_button.clicked.connect(self._on_view_diff_clicked)
         verify_row.addWidget(self._view_diff_button)
         layout.addLayout(verify_row)
+        self._verify_button.hide()
+        self._view_diff_button.hide()
 
         return sidebar
 
@@ -375,6 +402,19 @@ class MainWindow(QMainWindow):
         page_layout = QHBoxLayout(page_bar)
         page_layout.setContentsMargins(16, 8, 16, 0)
         page_layout.addStretch(1)
+        self._clear_button = QPushButton("Clear")
+        self._clear_button.setObjectName("verifyButton")
+        self._clear_button.setToolTip("Clear loaded plans and temporary work, returning Spejl to its fresh-open state")
+        self._clear_button.clicked.connect(self._on_clear_clicked)
+        page_layout.addWidget(self._clear_button)
+        self._resolve_button = QPushButton("Resolve")
+        self._resolve_button.setObjectName("verifyButton")
+        self._resolve_button.setToolTip(
+            "Move every currently flagged text run 3 points to the right, then refresh the overlap findings"
+        )
+        self._resolve_button.setEnabled(False)
+        self._resolve_button.clicked.connect(self._on_resolve_clicked)
+        page_layout.addWidget(self._resolve_button)
         self._previous_page_button = QPushButton("‹ Previous")
         self._previous_page_button.setObjectName("verifyButton")
         self._previous_page_button.clicked.connect(lambda: self._change_preview_page(-1))
@@ -391,10 +431,10 @@ class MainWindow(QMainWindow):
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         self._preview_splitter = splitter
-        self._source_view, source_pane, self._source_scroll = self._make_preview_pane(
+        self._source_view, source_pane, self._source_scroll, self._source_filename_label = self._make_preview_pane(
             "Source", scrollable=True
         )
-        self._mirrored_view, mirrored_pane, self._mirrored_scroll = self._make_preview_pane(
+        self._mirrored_view, mirrored_pane, self._mirrored_scroll, self._mirrored_filename_label = self._make_preview_pane(
             "Mirrored", zoomable=True, scrollable=True
         )
         splitter.addWidget(source_pane)
@@ -446,24 +486,156 @@ class MainWindow(QMainWindow):
 
     def _update_page_navigation(self) -> None:
         session = self._document_session
-        self._page_label.setText(session.label)
-        self._previous_page_button.setEnabled(session.page_index > 0)
-        self._next_page_button.setEnabled(session.page_index < session.page_count - 1)
+        plan_index = (
+            self._batch_order.index(self._input_path)
+            if self._input_path in self._batch_order else -1
+        )
+        plan_count = len(self._batch_order)
+        if plan_count > 1 and plan_index >= 0:
+            plan_label = f"Plan {plan_index + 1} of {plan_count}"
+            self._page_label.setText(
+                f"{plan_label} · {session.label.lower()}" if session.is_paginated else plan_label
+            )
+        else:
+            self._page_label.setText(session.label)
+        self._previous_page_button.setEnabled(session.page_index > 0 or plan_index > 0)
+        self._next_page_button.setEnabled(
+            session.page_index < session.page_count - 1
+            or (plan_index >= 0 and plan_index < plan_count - 1)
+        )
+        self._update_resolve_button_state()
+
+    def _update_resolve_button_state(self) -> None:
+        entry = self._batch_entries.get(self._input_path) if self._input_path else None
+        self._resolve_button.setEnabled(
+            not self._clear_pending
+            and entry is not None
+            and entry.output is not None
+            and entry.route is Route.VECTOR
+            and entry.overlaps_checked
+            and bool(entry.overlap_findings)
+        )
+
+    def _on_clear_clicked(self) -> None:
+        """Clear the current work session without interrupting protected writes."""
+        if self._clear_pending:
+            return
+        if self._job_running() or (
+            self._verify_worker is not None and self._verify_worker.isRunning()
+        ):
+            self._clear_pending = True
+            self._clear_button.setEnabled(False)
+            self._resolve_button.setEnabled(False)
+            if self._job_running():
+                self._job_controller.request_cancel()
+            self._status_label.setText("Clearing after the current operation finishes safely…")
+            return
+        self._clear_session()
+
+    def _on_deferred_clear_ready(self) -> None:
+        if not self._clear_pending:
+            return
+        if self._job_running() or (
+            self._verify_worker is not None and self._verify_worker.isRunning()
+        ):
+            return
+        self._clear_pending = False
+        self._clear_session()
+
+    def _clear_session(self) -> None:
+        """Return all loaded and generated plan state to its initial UI state."""
+        self._batch_entries.clear()
+        self._batch_order.clear()
+        self._batch_queue.clear()
+        self._batch_axis = None
+        self._active_batch_path = None
+        self._input_path = None
+        self._output_path = None
+        self._output_axis = None
+        self._output_route = None
+        self._diff_overlay_path = None
+        self._selected_text_indexes.clear()
+        self._document_session = DocumentSession()
+        self._mirrored_zoom = 1.0
+        self._preview_dpi = 150
+
+        self._uploaded_list.clear()
+        self._mirrored_list.clear()
+        self._flags_list.clear()
+        self._review_summary.setText("Choose a plan to begin")
+        self._drop_zone.clear()
+        self._route_badge.hide()
+        self._source_filename_label.setText("No file selected")
+        self._source_filename_label.setToolTip("")
+        self._mirrored_filename_label.setText("No file selected")
+        self._mirrored_filename_label.setToolTip("")
+        self._source_view.set_pixmap_source(None)
+        self._mirrored_view.set_pixmap_source(None)
+        self._mirrored_view.set_text_regions([])
+        self._reset_view_button.hide()
+        self._previous_page_button.setEnabled(False)
+        self._next_page_button.setEnabled(False)
+        self._page_label.setText("Single page")
+        self._mirror_button.setEnabled(False)
+        self._save_button.setEnabled(False)
+        self._verify_button.setEnabled(False)
+        self._view_diff_button.setEnabled(False)
+        self._progress.hide()
+        self._cancel_button.hide()
+        self._cancel_button.setEnabled(False)
+        self._clear_button.setEnabled(True)
+        self._status_label.setStyleSheet("color: #8CB3C0; font-size: 12px;")
+        self._status_label.setToolTip("")
+        self._status_label.setText("")
+        self._axis_buttons[Axis.VERTICAL].setChecked(True)
+        self._sync_preview_scale()
+        for scrollbar in (
+            self._source_scroll.horizontalScrollBar(),
+            self._source_scroll.verticalScrollBar(),
+            self._mirrored_scroll.horizontalScrollBar(),
+            self._mirrored_scroll.verticalScrollBar(),
+        ):
+            scrollbar.setValue(0)
+
+        # A Clear action discards generated output and verification images in
+        # the app's private temp directory; original source files are untouched.
+        self._temp_dir.cleanup()
+        self._temp_dir = tempfile.TemporaryDirectory(prefix="spejl_gui_")
+        self._worker = None
+        self._verify_worker = None
+        self._job_controller.worker = None
+        self._job_controller._cancel_requested = False
+        self._update_resolve_button_state()
 
     def _change_preview_page(self, offset: int) -> None:
-        if not self._document_session.move(offset) or self._input_path is None:
+        if self._input_path is None:
             return
+        if not self._document_session.move(offset):
+            if self._input_path not in self._batch_order:
+                return
+            target_row = self._batch_order.index(self._input_path) + offset
+            if 0 <= target_row < len(self._batch_order):
+                self._select_batch_entry(self._batch_order[target_row])
+            return
+        entry = self._batch_entries.get(self._input_path)
+        if entry is not None:
+            entry.page_index = self._document_session.page_index
         self._source_view.set_pixmap_source(
-            load_preview(self._input_path, page_index=self._document_session.page_index)
+            load_preview(self._input_path, dpi=self._preview_dpi,
+                         page_index=self._document_session.page_index)
         )
         if self._output_path is not None and self._output_path.suffix.lower() == ".pdf":
+            import pymupdf
+            output_doc = pymupdf.open(str(self._output_path))
+            try:
+                output_page = min(self._document_session.page_index, output_doc.page_count - 1)
+            finally:
+                output_doc.close()
             self._mirrored_view.set_pixmap_source(
-                load_preview(self._output_path, page_index=self._document_session.page_index)
+                load_preview(self._output_path, dpi=self._preview_dpi,
+                             page_index=max(0, output_page))
             )
-        if self._document_session.page_index:
-            self._mirrored_view.set_text_regions([])
-        else:
-            self._refresh_mirrored_text_regions()
+        self._refresh_mirrored_text_regions()
         self._update_page_navigation()
         self._sync_preview_scale()
 
@@ -513,9 +685,59 @@ class MainWindow(QMainWindow):
         self._source_view.render_at_scale(shared_scale)
         self._mirrored_view.render_at_scale(shared_scale)
 
+    def _preview_dpi_for_zoom(self) -> int:
+        """Render vector PDFs with enough pixels for the current zoom level."""
+        import math
+        dpi = min(300, round(150 * math.sqrt(max(1.0, self._mirrored_zoom))))
+        longest_page_points = 0.0
+        import pymupdf
+        for path in (self._input_path, self._output_path):
+            if path is None or path.suffix.lower() != ".pdf":
+                continue
+            try:
+                doc = pymupdf.open(str(path))
+                try:
+                    if doc.page_count:
+                        longest_page_points = max(
+                            longest_page_points,
+                            max(doc[min(self._document_session.page_index, doc.page_count - 1)].rect.width,
+                                doc[min(self._document_session.page_index, doc.page_count - 1)].rect.height),
+                        )
+                finally:
+                    doc.close()
+            except Exception:  # Preview resolution must never block opening a plan.
+                continue
+        if longest_page_points:
+            # Avoid multiplying an already large sheet's base preview size
+            # as the user zooms, which could consume excessive memory.
+            dpi = min(dpi, max(150, int(6000 * 72 / longest_page_points)))
+        return max(150, dpi)
+
+    def _reload_previews_for_zoom(self) -> None:
+        self._preview_dpi = self._preview_dpi_for_zoom()
+        page_index = self._document_session.page_index
+        if self._input_path is not None:
+            self._source_view.set_pixmap_source(load_preview(
+                self._input_path, dpi=self._preview_dpi, page_index=page_index
+            ))
+        if self._output_path is not None:
+            output_page = page_index
+            if self._output_path.suffix.lower() == ".pdf":
+                import pymupdf
+                doc = pymupdf.open(str(self._output_path))
+                try:
+                    output_page = min(page_index, max(doc.page_count - 1, 0))
+                finally:
+                    doc.close()
+            self._mirrored_view.set_pixmap_source(load_preview(
+                self._output_path, dpi=self._preview_dpi, page_index=output_page
+            ))
+        self._refresh_mirrored_text_regions(selected=self._selected_text_indexes)
+        self._sync_preview_scale()
+
     def _make_preview_pane(
         self, caption: str, *, zoomable: bool = False, scrollable: bool = False
-    ) -> tuple[ScaledImageLabel, QWidget, QScrollArea | None]:
+    ) -> tuple[ScaledImageLabel, QWidget, QScrollArea | None, QLabel]:
         pane = QWidget()
         layout = QVBoxLayout(pane)
         layout.setContentsMargins(16, 12, 16, 16)
@@ -523,13 +745,16 @@ class MainWindow(QMainWindow):
         label = QLabel(caption)
         label.setObjectName("previewCaption")
         heading.addWidget(label)
+        filename_label = QLabel("No file selected")
+        filename_label.setStyleSheet("color: #8CB3C0; font-size: 11px;")
+        filename_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        heading.addWidget(filename_label, stretch=1)
         if zoomable:
             self._reset_view_button = QPushButton("Reset View")
             self._reset_view_button.setToolTip("Return the mirrored plan to its default fit view")
             self._reset_view_button.clicked.connect(self._reset_mirrored_view)
             self._reset_view_button.hide()
             heading.addWidget(self._reset_view_button)
-        heading.addStretch(1)
         layout.addLayout(heading)
         image_view = ScaledImageLabel()
         image_view.setStyleSheet(
@@ -537,7 +762,7 @@ class MainWindow(QMainWindow):
         )
         if not scrollable:
             layout.addWidget(image_view, stretch=1)
-            return image_view, pane, None
+            return image_view, pane, None, filename_label
         image_view.set_content_sized(True)
         scroll = QScrollArea()
         scroll.setWidget(image_view)
@@ -550,7 +775,7 @@ class MainWindow(QMainWindow):
             scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
         scroll.setStyleSheet("border: 0px;")
         layout.addWidget(scroll, stretch=1)
-        return image_view, pane, scroll
+        return image_view, pane, scroll, filename_label
 
     def _change_mirrored_zoom(
         self, direction: int, cursor_x: float | None = None, cursor_y: float | None = None
@@ -581,7 +806,7 @@ class MainWindow(QMainWindow):
                 )
         self._mirrored_zoom = levels[target]
         self._reset_view_button.show()
-        self._sync_preview_scale()
+        self._reload_previews_for_zoom()
         if anchor is None:
             QTimer.singleShot(0, self._sync_source_viewport)
         else:
@@ -604,8 +829,9 @@ class MainWindow(QMainWindow):
     def _reset_mirrored_view(self) -> None:
         """Restore the default fit scale and remove the temporary reset control."""
         self._mirrored_zoom = 1.0
+        self._preview_dpi = 150
         self._reset_view_button.hide()
-        self._sync_preview_scale()
+        self._reload_previews_for_zoom()
         QTimer.singleShot(0, lambda: self._mirrored_scroll.verticalScrollBar().setValue(0))
         QTimer.singleShot(0, lambda: self._mirrored_scroll.horizontalScrollBar().setValue(0))
         QTimer.singleShot(0, self._sync_source_viewport)
@@ -661,49 +887,147 @@ class MainWindow(QMainWindow):
             self._worker is not None and self._worker.isRunning()
         )
 
+    def _on_files_chosen(self, paths: list[Path]) -> None:
+        added: list[Path] = []
+        for raw_path in paths:
+            path = raw_path.resolve()
+            if path in self._batch_entries:
+                continue
+            name, warning = mirrored_filename(path)
+            self._batch_entries[path] = BatchEntry(path, name, warning)
+            self._batch_order.append(path)
+            added.append(path)
+        if not added:
+            self._mirror_button.setEnabled(bool(self._batch_order) and not self._job_running())
+            self._status_label.setText("Those plans are already in the Uploaded list.")
+            return
+        self._drop_zone.set_files(self._batch_order)
+        self._refresh_batch_lists()
+        self._select_batch_entry(added[0])
+        self._mirror_button.setEnabled(not self._job_running())
+        warnings = sum(self._batch_entries[path].naming_warning for path in added)
+        self._status_label.setText(
+            f"Added {len(added)} plan(s)."
+            + (f" {warnings} filename(s) have no R/S orientation field." if warnings else "")
+        )
+
     def _on_file_chosen(self, path: Path) -> None:
+        """Backward-compatible single-file entry point used by integrations/tests."""
+        self._on_files_chosen([path])
+
+    def _refresh_batch_lists(self) -> None:
+        selected = self._input_path
+        self._selecting_batch_item = True
+        try:
+            self._uploaded_list.clear()
+            self._mirrored_list.clear()
+            marks = {"queued": "○", "processing": "◌", "completed": "✓", "failed": "✖"}
+            for path in self._batch_order:
+                entry = self._batch_entries[path]
+                uploaded = QListWidgetItem(path.name)
+                uploaded.setData(Qt.ItemDataRole.UserRole, str(path))
+                uploaded.setToolTip(str(path))
+                self._uploaded_list.addItem(uploaded)
+                mirrored = QListWidgetItem(f"{marks.get(entry.status, '○')}  {entry.mirrored_name}")
+                mirrored.setData(Qt.ItemDataRole.UserRole, str(path))
+                mirrored.setToolTip(entry.error or entry.mirrored_name)
+                if entry.status == "completed":
+                    mirrored.setForeground(Qt.GlobalColor.darkGreen)
+                elif entry.status == "failed":
+                    mirrored.setForeground(Qt.GlobalColor.red)
+                elif entry.naming_warning:
+                    mirrored.setForeground(Qt.GlobalColor.darkYellow)
+                self._mirrored_list.addItem(mirrored)
+                if path == selected:
+                    self._uploaded_list.setCurrentRow(self._uploaded_list.count() - 1)
+                    self._mirrored_list.setCurrentRow(self._mirrored_list.count() - 1)
+        finally:
+            self._selecting_batch_item = False
+
+    def _path_from_list_item(self, item: QListWidgetItem | None) -> Path | None:
+        return Path(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+
+    def _on_uploaded_item_selected(self, current: QListWidgetItem | None, _previous=None) -> None:
+        if not self._selecting_batch_item and (path := self._path_from_list_item(current)):
+            self._select_batch_entry(path)
+
+    def _on_mirrored_item_selected(self, current: QListWidgetItem | None, _previous=None) -> None:
+        if not self._selecting_batch_item and (path := self._path_from_list_item(current)):
+            self._select_batch_entry(path)
+
+    def _select_batch_entry(self, path: Path) -> None:
+        if path not in self._batch_entries:
+            return
+        if self._input_path in self._batch_entries:
+            self._batch_entries[self._input_path].page_index = self._document_session.page_index
+        entry = self._batch_entries[path]
+        self._mirrored_zoom = 1.0
+        self._preview_dpi = 150
+        self._selected_text_indexes.clear()
+        # Keep both lists on the same plan whichever list initiated selection.
+        # Block the selection callbacks while moving the counterpart row.
+        self._selecting_batch_item = True
+        try:
+            row = self._batch_order.index(path)
+            if self._uploaded_list.currentRow() != row:
+                self._uploaded_list.setCurrentRow(row)
+            if self._mirrored_list.currentRow() != row:
+                self._mirrored_list.setCurrentRow(row)
+        finally:
+            self._selecting_batch_item = False
         self._input_path = path
-        self._output_path = None
+        self._output_path = entry.output
+        self._output_axis = entry.document.axis if entry.document is not None else None
+        self._output_route = entry.route
+        self._diff_overlay_path = entry.diff_overlay
         self._document_session.open(path)
+        self._document_session.page_index = min(entry.page_index, self._document_session.page_count - 1)
         self._update_page_navigation()
         self._drop_zone.set_file(path)
-        # Not re-enabled while a job is still in flight: the worker
-        # already running holds its OWN captured input/output paths
-        # (MirrorWorker.__init__ copies them), so swapping the file here
-        # is harmless to it — but enabling this button would let a click
-        # start a SECOND MirrorWorker and overwrite self._worker with it
-        # while the first is still running. Nothing then holds a Python
-        # reference to that first worker any more, even though its
-        # background thread keeps running — a silent resource leak at
-        # best, a use-after-free crash at worst if PySide6 garbage-
-        # collects the orphaned QThread wrapper out from under its own
-        # still-executing C++ thread. _on_mirror_succeeded re-enables it
-        # once the in-flight job actually finishes.
-        self._mirror_button.setEnabled(not self._job_running())
-        self._save_button.setEnabled(False)
-        self._verify_button.setEnabled(False)
-        self._view_diff_button.setEnabled(False)
-        self._diff_overlay_path = None
-        self._flags_list.clear()
-        self._review_summary.setText("Ready to mirror")
-        if self._job_running():
-            self._status_label.setText("Mirroring the previous file — this one will be ready to mirror once it finishes.")
-        else:
-            self._status_label.setText("")
-        self._mirrored_view.set_pixmap_source(None)
+        self._source_filename_label.setText(path.name)
+        self._source_filename_label.setToolTip(str(path))
+        self._mirrored_filename_label.setText(entry.mirrored_name if entry.output else "Waiting to be mirrored")
+        self._mirrored_filename_label.setToolTip(entry.mirrored_name)
+        self._mirror_button.setEnabled(bool(self._batch_order) and not self._job_running())
+        completed = entry.status == "completed" and entry.output is not None
+        self._save_button.setEnabled(completed)
+        self._verify_button.setEnabled(completed and entry.route is Route.RASTER)
+        self._view_diff_button.setEnabled(entry.diff_overlay is not None)
+        self._mirrored_view.set_pixmap_source(
+            load_preview(entry.output, dpi=self._preview_dpi,
+                         page_index=self._document_session.page_index)
+            if entry.output else None
+        )
         self._mirrored_view.set_text_regions([])
         self._reset_mirrored_view()
 
         from spejl.router import sniff_route
 
-        try:
-            route = sniff_route(path)
-        except ValueError:
-            route = None
+        route = entry.route
+        if route is None:
+            try:
+                route = sniff_route(path)
+            except ValueError:
+                route = None
         self._show_route_badge(route)
 
-        pixmap = load_preview(path, page_index=self._document_session.page_index)
+        pixmap = load_preview(path, dpi=self._preview_dpi,
+                              page_index=self._document_session.page_index)
         self._source_view.set_pixmap_source(pixmap)
+        if entry.output is not None:
+            self._refresh_mirrored_text_regions()
+        if entry.document is not None:
+            self._populate_flags(entry.document)
+        else:
+            self._flags_list.clear()
+            self._review_summary.setText(
+                "Processing…" if entry.status == "processing" else
+                "Processing failed" if entry.status == "failed" else "Ready to mirror"
+            )
+        if entry.error:
+            self._status_label.setText(entry.error)
+        elif entry.output is not None:
+            self._set_status_with_overlap("Plan ready for review.")
         self._sync_preview_scale()
         if pixmap is None:
             self._status_label.setText("Could not preview this file — mirroring may still work.")
@@ -723,7 +1047,7 @@ class MainWindow(QMainWindow):
         self._route_badge.show()
 
     def _on_mirror_clicked(self) -> None:
-        if self._input_path is None:
+        if not self._batch_order:
             return
         if self._job_running():
             # Defence in depth alongside the button-disable above: the
@@ -735,89 +1059,107 @@ class MainWindow(QMainWindow):
             # (a second worker silently orphaning the first, still-
             # running one) this and that guard together close off.
             return
-        axis = next(a for a, btn in self._axis_buttons.items() if btn.isChecked())
-        out_name = f"{self._input_path.stem}_mirrored{self._input_path.suffix}"
-        output_path = Path(self._temp_dir.name) / out_name
-
+        self._batch_axis = next(a for a, btn in self._axis_buttons.items() if btn.isChecked())
+        self._batch_queue = list(self._batch_order)
         self._mirror_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._progress.show()
         self._cancel_button.show()
         self._cancel_button.setEnabled(False)
-        self._flags_list.clear()
-        self._review_summary.setText("Processing in progress")
-        self._status_label.setText("Preparing plan…")
+        for path in self._batch_queue:
+            entry = self._batch_entries[path]
+            entry.status, entry.error = "queued", None
+        self._refresh_batch_lists()
+        self._start_next_batch_job()
 
-        self._worker = self._job_controller.start(self._input_path, output_path, axis)
-        # The worker's OWN input path, bound at connect time — not
-        # read from self._input_path when the signal fires, since by
-        # then the user may have loaded a different file (see
-        # _on_file_chosen). Lets the handler tell "my job finished"
-        # apart from "A job finished, possibly someone else's".
-        job_input = self._input_path
+    def _start_next_batch_job(self) -> None:
+        if self._clear_pending or not self._batch_order:
+            return
+        if not self._batch_queue:
+            self._active_batch_path = None
+            self._progress.hide()
+            self._cancel_button.hide()
+            self._mirror_button.setEnabled(bool(self._batch_order))
+            completed = sum(entry.status == "completed" for entry in self._batch_entries.values())
+            failed = sum(entry.status == "failed" for entry in self._batch_entries.values())
+            self._status_label.setText(f"Batch complete: {completed} mirrored" + (f", {failed} failed" if failed else ""))
+            return
+        job_input = self._batch_queue.pop(0)
+        entry = self._batch_entries[job_input]
+        entry.status = "processing"
+        self._active_batch_path = job_input
+        index = self._batch_order.index(job_input)
+        output_path = Path(self._temp_dir.name) / f"{index:04d}_{entry.mirrored_name}"
+        self._status_label.setText(f"Mirroring {index + 1} of {len(self._batch_order)}: {job_input.name}")
+        self._refresh_batch_lists()
+        self._worker = self._job_controller.start(job_input, output_path, self._batch_axis or Axis.VERTICAL)
+        self._worker.finished.connect(self._on_deferred_clear_ready)
         self._worker.succeeded.connect(
             lambda document, route, job_input=job_input: self._on_mirror_succeeded(document, route, job_input)
         )
         self._worker.failed.connect(
             lambda message, job_input=job_input: self._on_mirror_failed(message, job_input)
         )
+        # Connect result handlers before starting; vector PDFs can finish
+        # quickly enough that starting inside the controller loses the signal.
         self._worker.start()
 
     def _on_mirror_succeeded(self, document: Document, route: Route, job_input: Path) -> None:
-        self._progress.hide()
-        self._cancel_button.hide()
         if self._job_controller.cancel_requested:
             return
-        if job_input != self._input_path:
-            # This job's own result is for a file the user has since
-            # navigated away from (see _on_file_chosen) — applying it
-            # now would silently replace whatever the CURRENT file's
-            # own state is with a stale result the user never asked to
-            # see. _on_file_chosen already re-enabled the mirror button
-            # for the current file once this (the job it was waiting
-            # on) finishes; nothing else here is still relevant.
-            self._mirror_button.setEnabled(not self._job_running())
-            return
-        self._mirror_button.setEnabled(True)
-        self._output_path = document.output
-        self._output_axis = document.axis
-        self._output_route = route
-        self._save_button.setEnabled(True)
-        self._reset_mirrored_view()
+        entry = self._batch_entries[job_input]
+        entry.status = "completed"
+        entry.output = document.output
+        entry.document = document
+        entry.route = route
+        self._refresh_batch_lists()
+        if job_input == self._input_path:
+            self._output_path = document.output
+            self._output_axis = document.axis
+            self._output_route = route
+            self._save_button.setEnabled(True)
+            self._mirrored_filename_label.setText(entry.mirrored_name)
+            self._reset_mirrored_view()
         # Verify re-detects text on the SOURCE to know what to exclude
         # (see qa/verify.py) — meaningful only for the raster route,
         # where the drawing is reconstructed from pixels and geometry
         # loss is a real possibility. PDF output uses a different page coordinate system;
         # this image-file verifier is only connected for raster input.
         # Image-bearing PDF pages run the raster checks during conversion.
-        self._verify_button.setEnabled(route is Route.RASTER)
-        self._view_diff_button.setEnabled(False)
-        self._diff_overlay_path = None
+            self._verify_button.setEnabled(route is Route.RASTER)
+            self._view_diff_button.setEnabled(False)
+            self._diff_overlay_path = None
+            pixmap = load_preview(document.output, dpi=self._preview_dpi,
+                                  page_index=self._document_session.page_index)
+            self._mirrored_view.set_pixmap_source(pixmap)
+            self._refresh_mirrored_text_regions()
+            self._sync_preview_scale()
 
-        pixmap = load_preview(document.output, page_index=self._document_session.page_index)
-        self._mirrored_view.set_pixmap_source(pixmap)
-        self._refresh_mirrored_text_regions()
-        self._sync_preview_scale()
-
-        total_runs = sum(p.text_runs_mirrored for p in document.pages)
-        total_flags = sum(len(p.flags) for p in document.pages)
-        self._status_label.setText(
-            f"{total_runs} text run(s) mirrored"
-            + (f" · {total_flags} flag(s) below" if total_flags else " · no flags")
-        )
-        self._populate_flags(document)
+            total_runs = sum(p.text_runs_mirrored for p in document.pages)
+            total_flags = sum(len(p.flags) for p in document.pages)
+            self._status_label.setText(
+                f"{total_runs} text run(s) mirrored"
+                + (f" · {total_flags} flag(s) below" if total_flags else " · no flags")
+            )
+            self._set_status_with_overlap(self._status_label.text())
+            self._populate_flags(document)
+        if not self._batch_queue:
+            self._mirror_button.setEnabled(True)
+        QTimer.singleShot(0, self._start_next_batch_job)
 
     def _on_mirror_failed(self, message: str, job_input: Path) -> None:
-        if job_input != self._input_path:
-            self._progress.hide()
-            self._cancel_button.hide()
-            self._mirror_button.setEnabled(not self._job_running())
+        if self._clear_pending:
+            self._on_deferred_clear_ready()
             return
-        self._progress.hide()
-        self._cancel_button.hide()
-        self._mirror_button.setEnabled(True)
-        self._status_label.setText("")
-        QMessageBox.critical(self, "Couldn't mirror this plan", message)
+        entry = self._batch_entries[job_input]
+        entry.status, entry.error = "failed", message
+        self._refresh_batch_lists()
+        if job_input == self._input_path:
+            self._review_summary.setText("Processing failed")
+            self._status_label.setText(f"{job_input.name}: {message}")
+        if not self._batch_queue:
+            self._mirror_button.setEnabled(True)
+        QTimer.singleShot(0, self._start_next_batch_job)
 
     def _on_job_stage_changed(self, message: str) -> None:
         self._status_label.setText(message)
@@ -829,11 +1171,16 @@ class MainWindow(QMainWindow):
         self._job_controller.request_cancel()
 
     def _on_mirror_cancelled(self) -> None:
+        self._batch_queue.clear()
+        if self._active_batch_path in self._batch_entries:
+            self._batch_entries[self._active_batch_path].status = "queued"
+        self._active_batch_path = None
         self._progress.hide()
         self._cancel_button.hide()
-        self._mirror_button.setEnabled(self._input_path is not None)
+        self._mirror_button.setEnabled(bool(self._batch_order))
         self._review_summary.setText("Mirror cancelled — source remains unchanged")
         self._flags_list.clear()
+        self._on_deferred_clear_ready()
 
     def _on_verify_clicked(self) -> None:
         if self._input_path is None or self._output_path is None or self._output_axis is None:
@@ -848,6 +1195,7 @@ class MainWindow(QMainWindow):
         self._status_label.setText("Verifying against the source… (re-reading the source's own text)")
 
         self._verify_worker = VerifyWorker(self._input_path, self._output_path, self._output_axis, overlay_path)
+        self._verify_worker.finished.connect(self._on_deferred_clear_ready)
         # Bound at connect time, not read from self._output_path when the
         # signal fires — same reasoning as MirrorWorker's own job_input
         # capture (see _on_mirror_clicked): the user may have loaded and
@@ -868,6 +1216,8 @@ class MainWindow(QMainWindow):
             return
         self._verify_button.setEnabled(True)
         self._diff_overlay_path = overlay_path
+        if self._input_path in self._batch_entries:
+            self._batch_entries[self._input_path].diff_overlay = overlay_path
         self._view_diff_button.setEnabled(True)
         self._review_summary.setText(summarize_verification(report).label)
 
@@ -908,6 +1258,57 @@ class MainWindow(QMainWindow):
         self._status_label.setText("")
         QMessageBox.critical(self, "Couldn't verify this plan", message)
 
+    def _on_resolve_clicked(self) -> None:
+        """Nudge every flagged text run three points right, across all pages."""
+        if self._output_path is None or self._output_route is not Route.VECTOR:
+            return
+        entry = self._batch_entries.get(self._input_path) if self._input_path else None
+        if entry is None:
+            return
+
+        from spejl.vector.pdf_mirror import text_drawing_overlap_runs, translate_pdf_text_runs
+
+        try:
+            overlaps = text_drawing_overlap_runs(self._output_path)
+            entry.overlap_findings = [(page + 1, text) for page, _run, text in overlaps]
+            entry.overlaps_checked = True
+            if not overlaps:
+                self._set_status_with_overlap("No flagged text needs resolving.")
+                return
+
+            translations = {
+                (page_index, run_index): (3.0, 0.0)
+                for page_index, run_index, _text in overlaps
+            }
+            edited = Path(self._temp_dir.name) / f"{self._output_path.stem}_resolved.pdf"
+            translate_pdf_text_runs(
+                self._output_path,
+                edited,
+                translations,
+                axis=self._output_axis or Axis.VERTICAL,
+            )
+            edited.replace(self._output_path)
+
+            page_index = self._document_session.page_index
+            self._mirrored_view.set_pixmap_source(load_preview(
+                self._output_path, dpi=self._preview_dpi, page_index=page_index
+            ))
+            selected = {
+                run_index
+                for page, run_index, _text in overlaps
+                if page == page_index
+            }
+            self._selected_text_indexes = selected
+            self._refresh_mirrored_text_regions(selected=selected)
+            self._sync_preview_scale()
+            count = len(overlaps)
+            self._set_status_with_overlap(
+                f"Moved {count} flagged text item(s) 3 pt to the right; checking remaining overlaps.",
+                refresh=True,
+            )
+        except Exception as exc:  # noqa: BLE001 - surfaced in the editor
+            QMessageBox.critical(self, "Couldn't resolve flagged text", str(exc))
+
     def _on_view_diff_clicked(self) -> None:
         if self._diff_overlay_path is None or not self._diff_overlay_path.exists():
             return
@@ -936,37 +1337,22 @@ class MainWindow(QMainWindow):
     def _on_save_clicked(self) -> None:
         if self._output_path is None or self._input_path is None:
             return
-        suggested = str(self._input_path.with_name(self._output_path.name))
-        save_filter = (
-            "PDF files (*.pdf);;PNG image (*.png);;JPEG image (*.jpg *.jpeg);;"
-            "TIFF image (*.tif *.tiff);;Bitmap image (*.bmp)"
-        )
-        path_str, selected_filter = QFileDialog.getSaveFileName(
-            self, "Save mirrored plan", suggested,
-            save_filter,
+        entry = self._batch_entries.get(self._input_path)
+        mirrored_name = entry.mirrored_name if entry else self._output_path.name
+        suggested = str(self._input_path.with_name(Path(mirrored_name).stem + ".jpg"))
+        path_str, _selected_filter = QFileDialog.getSaveFileName(
+            self, "Save mirrored page as JPEG", suggested,
+            "JPEG image (*.jpg *.jpeg)",
         )
         if not path_str:
             return
         dest = Path(path_str)
-        suffixes = {
-            "PDF files": ".pdf", "PNG image": ".png", "JPEG image": ".jpg",
-            "TIFF image": ".tif", "Bitmap image": ".bmp",
-        }
         if not dest.suffix:
-            dest = dest.with_suffix(next((suffix for label, suffix in suffixes.items() if selected_filter.startswith(label)), ".pdf"))
-
-        if dest.suffix.lower() == ".pdf":
-            shutil.copyfile(self._output_path, dest)
-        elif dest.suffix.lower() in {".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp"}:
-            self._export_mirrored_image(dest)
-        else:
-            QMessageBox.warning(self, "Unsupported export", "Choose PDF, PNG, JPEG, TIFF, or BMP.")
+            dest = dest.with_suffix(".jpg")
+        if dest.suffix.lower() not in {".jpg", ".jpeg"}:
+            QMessageBox.warning(self, "JPEG required", "Save As exports a JPEG file. Choose .jpg or .jpeg.")
             return
-
-        sidecar_src = self._output_path.with_suffix(self._output_path.suffix + ".spejl.json")
-        if dest.suffix.lower() == ".pdf" and sidecar_src.exists():
-            shutil.copyfile(sidecar_src, dest.with_suffix(dest.suffix + ".spejl.json"))
-
+        self._export_mirrored_image(dest)
         self._status_label.setText(f"Saved to {dest.name}")
 
     def _export_mirrored_image(self, destination: Path) -> None:
@@ -982,9 +1368,8 @@ class MainWindow(QMainWindow):
 
             document = pymupdf.open(str(self._output_path))
             try:
-                if document.page_count != 1:
-                    raise ValueError("Image export currently supports the first mirrored PDF page only.")
-                pixmap = document[0].get_pixmap(dpi=300, alpha=False)
+                page_index = min(self._document_session.page_index, document.page_count - 1)
+                pixmap = document[page_index].get_pixmap(dpi=300, alpha=False)
                 image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
                     pixmap.height, pixmap.width, pixmap.n
                 )
@@ -1048,11 +1433,12 @@ class MainWindow(QMainWindow):
         try:
             remove_pdf_text_runs(self._output_path, edited, removals)
             edited.replace(self._output_path)
-            pixmap = load_preview(self._output_path)
+            pixmap = load_preview(self._output_path, dpi=self._preview_dpi,
+                                  page_index=self._document_session.page_index)
             self._mirrored_view.set_pixmap_source(pixmap)
             self._refresh_mirrored_text_regions()
             self._sync_preview_scale()
-            self._status_label.setText("Selected text removed from the mirrored PDF.")
+            self._set_status_with_overlap("Selected text removed from the mirrored PDF.", refresh=True)
         except Exception as exc:  # noqa: BLE001 - surfaced in the editor
             QMessageBox.critical(self, "Couldn't remove text", str(exc))
 
@@ -1118,28 +1504,35 @@ class MainWindow(QMainWindow):
                 axis=self._output_axis or Axis.VERTICAL,
             )
             edited.replace(self._output_path)
-            self._mirrored_view.set_pixmap_source(load_preview(self._output_path))
+            self._mirrored_view.set_pixmap_source(load_preview(
+                self._output_path, dpi=self._preview_dpi,
+                page_index=self._document_session.page_index
+            ))
             self._refresh_mirrored_text_regions()
             self._sync_preview_scale()
-            self._status_label.setText("Selected text moved without changing font, spacing, or orientation.")
+            self._set_status_with_overlap(
+                "Selected text moved without changing font, spacing, or orientation.",
+                refresh=True,
+            )
         except Exception as exc:  # noqa: BLE001 - surfaced in the editor
             QMessageBox.critical(self, "Couldn't move text", str(exc))
 
     def _refresh_mirrored_text_regions(self, selected: set[int] | None = None) -> None:
-        """Expose first-page vector text as click targets over the preview."""
+        """Expose current-page vector text as click targets over the preview."""
         if self._output_path is None or self._output_route is not Route.VECTOR:
             self._mirrored_view.set_text_regions([])
             return
         import pymupdf
         doc = pymupdf.open(str(self._output_path))
         try:
-            if doc.page_count == 0:
+            page_index = self._document_session.page_index
+            if doc.page_count == 0 or page_index >= doc.page_count:
                 self._mirrored_view.set_text_regions([])
                 return
-            zoom = 150 / 72.0  # must match gui.imaging.load_preview
+            zoom = self._preview_dpi / 72.0  # must match gui.imaging.load_preview
             regions = []
             index = 0
-            for trace in doc[0].get_texttrace():
+            for trace in doc[page_index].get_texttrace():
                 if trace.get("type") != 0 or not trace.get("chars"):
                     continue
                 x0, y0, x1, y1 = trace["bbox"]
@@ -1149,12 +1542,52 @@ class MainWindow(QMainWindow):
         finally:
             doc.close()
 
+    def _set_status_with_overlap(self, message: str, *, refresh: bool = False) -> None:
+        """Show current plan's text/drawing collision findings in the status area."""
+        entry = self._batch_entries.get(self._input_path) if self._input_path else None
+        if entry is None or entry.output is None:
+            self._status_label.setText(message)
+            self._update_resolve_button_state()
+            return
+        if refresh or not entry.overlaps_checked:
+            try:
+                if entry.output.suffix.lower() == ".pdf":
+                    from spejl.vector.pdf_mirror import text_drawing_overlap_findings
+                    entry.overlap_findings = text_drawing_overlap_findings(entry.output)
+                else:
+                    entry.overlap_findings = []
+                entry.overlaps_checked = True
+            except Exception as exc:  # Diagnostics should never interrupt editing.
+                entry.overlap_findings = []
+                entry.overlaps_checked = False
+                self._status_label.setText(f"{message}\nOverlap check unavailable: {exc}")
+                self._update_resolve_button_state()
+                return
+        findings = entry.overlap_findings
+        self._update_resolve_button_state()
+        if not findings:
+            self._status_label.setStyleSheet("color: #8CB3C0; font-size: 12px;")
+            self._status_label.setToolTip("No text and drawing overlaps were detected.")
+            self._status_label.setText(f"{message}\nNo text/drawing overlaps detected.")
+            return
+        labels = [f"p.{page}: {text!r}" for page, text in findings]
+        visible = ", ".join(labels[:3])
+        if len(labels) > 3:
+            visible += f", and {len(labels) - 3} more"
+        self._status_label.setStyleSheet("color: #FFC27A; font-size: 12px; font-weight: 600;")
+        self._status_label.setToolTip(
+            "Text runs whose glyph bounds intersect drawing geometry:\n" + "\n".join(labels)
+        )
+        self._status_label.setText(
+            f"{message}\n⚠ {len(findings)} text/drawing overlap(s): {visible}"
+        )
+
     def _on_preview_text_selection_changed(self, indexes: list[int]) -> None:
         self._selected_text_indexes = set(indexes)
         if not indexes:
-            self._status_label.setText("Selection cleared.")
+            self._set_status_with_overlap("Selection cleared.")
             return
-        self._status_label.setText(
+        self._set_status_with_overlap(
             f"{len(indexes)} text item(s) selected. Arrow keys move all; Alt+arrow snaps to text; "
             "Shift uses 5 pt; Esc clears."
         )
@@ -1169,24 +1602,29 @@ class MainWindow(QMainWindow):
         guides = []
         if snap_to_text:
             right, down, guides = self._mirrored_view.snap_text_nudge(
-                right, down, pixels_per_point=150 / 72.0
+                right, down, pixels_per_point=self._preview_dpi / 72.0
             )
         from spejl.vector.pdf_mirror import translate_pdf_text_runs
         edited = Path(self._temp_dir.name) / f"{self._output_path.stem}_nudge.pdf"
         try:
             translate_pdf_text_runs(
-                self._output_path, edited, {(0, index): (right, down) for index in indexes},
+                self._output_path, edited,
+                {(self._document_session.page_index, index): (right, down) for index in indexes},
                 axis=self._output_axis or Axis.VERTICAL,
             )
             edited.replace(self._output_path)
-            self._mirrored_view.set_pixmap_source(load_preview(self._output_path))
+            self._mirrored_view.set_pixmap_source(load_preview(
+                self._output_path, dpi=self._preview_dpi,
+                page_index=self._document_session.page_index
+            ))
             self._refresh_mirrored_text_regions(selected=set(indexes))
             self._mirrored_view.show_alignment_guides(guides)
             self._sync_preview_scale()
             snapped = " Snapped to nearby text alignment." if guides else ""
-            self._status_label.setText(
+            self._set_status_with_overlap(
                 f"{len(indexes)} text item(s) moved.{snapped} "
-                "Arrow keys are exact; Alt+arrow snaps to nearby text; Shift uses 5 pt; Esc clears."
+                "Arrow keys are exact; Alt+arrow snaps to nearby text; Shift uses 5 pt; Esc clears.",
+                refresh=True,
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in the preview
             QMessageBox.critical(self, "Couldn't move text", str(exc))
