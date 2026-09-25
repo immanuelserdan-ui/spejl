@@ -67,7 +67,10 @@ class JpegExportDialog(QDialog):
                 border-radius: 5px; padding: 8px; font-weight: 600;
             }
             QLabel#displayName { color: #8CB3C0; padding: 4px 8px; }
-            QLabel#mirroredFileName { color: #EAF7FB; font-weight: 600; padding: 2px 4px; }
+            QLabel#mirroredPlanName {
+                color: #B9DFEA; background: #0A1928; border: 1px solid #1F4D61;
+                border-radius: 5px; padding: 8px; font-weight: 600;
+            }
             QCheckBox { color: #D7EEF5; spacing: 6px; }
             QScrollArea, QWidget#exportBody { background: #07111F; }
             QWidget#exportCell { background: #0A1928; border: 1px solid #1F4D61; border-radius: 6px; }
@@ -76,6 +79,7 @@ class JpegExportDialog(QDialog):
         """)
         self._choices: list[tuple[Path, str, QCheckBox]] = []
         self._filename_labels: list[QLabel] = []
+        self._mirrored_filename_labels: list[QLabel] = []
         layout = QVBoxLayout(self)
         intro = QLabel("Select source and mirrored PDFs to export. Every page becomes a JPEG.")
         layout.addWidget(intro)
@@ -99,6 +103,16 @@ class JpegExportDialog(QDialog):
             filename.setToolTip(str(entry.source))
             self._filename_labels.append(filename)
             name_layout.addWidget(filename)
+            mirrored_filename = QLabel(
+                entry.output.name if entry.output is not None and entry.output.is_file()
+                else "Mirrored copy: Not created yet"
+            )
+            mirrored_filename.setObjectName("mirroredPlanName")
+            mirrored_filename.setWordWrap(True)
+            mirrored_filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            mirrored_filename.setToolTip(str(entry.output) if entry.output is not None else "")
+            self._mirrored_filename_labels.append(mirrored_filename)
+            name_layout.addWidget(mirrored_filename)
             if entry.display_name and entry.display_name != entry.source.name:
                 display_name = QLabel(f"Display name: {entry.display_name}")
                 display_name.setObjectName("displayName")
@@ -111,13 +125,6 @@ class JpegExportDialog(QDialog):
                 cell_layout = QVBoxLayout(cell)
                 cell_layout.setContentsMargins(4, 4, 4, 4)
                 if path is not None and path.is_file():
-                    if kind == "mirrored":
-                        mirrored_name = QLabel(path.name)
-                        mirrored_name.setObjectName("mirroredFileName")
-                        mirrored_name.setWordWrap(True)
-                        mirrored_name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-                        mirrored_name.setToolTip(str(path))
-                        cell_layout.addWidget(mirrored_name)
                     try:
                         preview = load_preview(path, dpi=54)
                     except Exception:

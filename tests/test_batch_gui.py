@@ -544,9 +544,9 @@ def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
     try:
         assert dialog._filename_labels[0].text() == source.name
         assert "#planName" in dialog.styleSheet()
-        mirrored_filename = dialog.findChild(QLabel, "mirroredFileName")
-        assert mirrored_filename is not None
-        assert mirrored_filename.text() == mirrored.name
+        assert dialog._mirrored_filename_labels[0].text() == mirrored.name
+        assert dialog._mirrored_filename_labels[0].parentWidget() is dialog._filename_labels[0].parentWidget()
+        assert dialog.findChild(QLabel, "mirroredFileName") is None
         assert dialog.selected_items() == [(source, "source"), (source, "mirrored")]
         dialog._choices[0][2].setChecked(False)
         assert dialog.selected_items() == [(source, "mirrored")]
