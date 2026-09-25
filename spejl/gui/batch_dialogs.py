@@ -58,23 +58,55 @@ class JpegExportDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle("Choose PDFs to export as JPEG")
         self.resize(780, 570)
+        self.setStyleSheet("""
+            QDialog { background: #07111F; color: #EAF7FB; }
+            QLabel { color: #D7EEF5; }
+            QLabel#columnHeading { color: #37D5FF; font-weight: 700; padding: 4px; }
+            QLabel#planName {
+                color: #EAF7FB; background: #0D2638; border: 1px solid #1F4D61;
+                border-radius: 5px; padding: 8px; font-weight: 600;
+            }
+            QLabel#displayName { color: #8CB3C0; padding: 4px 8px; }
+            QCheckBox { color: #D7EEF5; spacing: 6px; }
+            QScrollArea, QWidget#exportBody { background: #07111F; }
+            QWidget#exportCell { background: #0A1928; border: 1px solid #1F4D61; border-radius: 6px; }
+            QPushButton { color: #D7EEF5; background: #0D2638; border: 1px solid #2B6479; border-radius: 5px; padding: 6px 10px; }
+            QPushButton:hover { background: #14364C; }
+        """)
         self._choices: list[tuple[Path, str, QCheckBox]] = []
+        self._filename_labels: list[QLabel] = []
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel("Select source and mirrored PDFs to export. Every page becomes a JPEG."))
+        intro = QLabel("Select source and mirrored PDFs to export. Every page becomes a JPEG.")
+        layout.addWidget(intro)
         scroll = QScrollArea()
         scroll.setWidgetResizable(True)
         body = QWidget()
+        body.setObjectName("exportBody")
         grid = QGridLayout(body)
-        grid.addWidget(QLabel("Plan"), 0, 0)
-        grid.addWidget(QLabel("Source"), 0, 1)
-        grid.addWidget(QLabel("Mirrored"), 0, 2)
+        for column, title in enumerate(("File name", "Source", "Mirrored")):
+            heading = QLabel(title)
+            heading.setObjectName("columnHeading")
+            grid.addWidget(heading, 0, column)
         for row, entry in enumerate(entries, start=1):
-            name = QLabel(entry.display_name or entry.source.name)
-            name.setWordWrap(True)
-            name.setToolTip(str(entry.source))
-            grid.addWidget(name, row, 0)
+            name_cell = QWidget()
+            name_layout = QVBoxLayout(name_cell)
+            name_layout.setContentsMargins(2, 2, 2, 2)
+            filename = QLabel(entry.source.name)
+            filename.setObjectName("planName")
+            filename.setWordWrap(True)
+            filename.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            filename.setToolTip(str(entry.source))
+            self._filename_labels.append(filename)
+            name_layout.addWidget(filename)
+            if entry.display_name and entry.display_name != entry.source.name:
+                display_name = QLabel(f"Display name: {entry.display_name}")
+                display_name.setObjectName("displayName")
+                display_name.setWordWrap(True)
+                name_layout.addWidget(display_name)
+            grid.addWidget(name_cell, row, 0)
             for col, kind, path in ((1, "source", entry.source), (2, "mirrored", entry.output)):
                 cell = QWidget()
+                cell.setObjectName("exportCell")
                 cell_layout = QVBoxLayout(cell)
                 cell_layout.setContentsMargins(4, 4, 4, 4)
                 if path is not None and path.is_file():
