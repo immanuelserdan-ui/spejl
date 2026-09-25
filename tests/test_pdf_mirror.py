@@ -314,13 +314,53 @@ def test_text_drawing_overlap_findings_name_only_colliding_text(tmp_path: Path):
     pdf = tmp_path / "overlap.pdf"
     doc.save(pdf)
     doc.close()
-
     assert text_drawing_overlap_findings(pdf) == [
         (1, "First overlap"),
         (1, "Second overlap"),
         (1, "Third overlap"),
     ]
 
+
+def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Path):
+    source = tmp_path / "edge-plan.pdf"
+    output = tmp_path / "edge-plan-mirrored.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_rect(pymupdf.Rect(20, 20, 205, 180))
+    shape.finish(color=(0, 0, 0), width=2)
+    # A door-swing-like curve also extends beyond the sheet edge. Its full
+    # stroke bounds must be kept with the wall when the content is fitted.
+    shape.draw_bezier(
+        pymupdf.Point(195, 35), pymupdf.Point(215, 35),
+        pymupdf.Point(215, 55), pymupdf.Point(195, 55),
+    )
+    shape.finish(color=(0, 0, 0), width=1)
+    shape.commit()
+    page.insert_text((60, 100), "Entry", fontsize=12)
+    doc.save(source)
+    doc.close()
+
+    mirror_pdf(source, output, axis=Axis.VERTICAL)
+    with pymupdf.open(output) as mirrored:
+        page = mirrored[0]
+        bounds = None
+        for kind, bbox in page.get_bboxlog():
+            if kind.startswith("clip-") or kind == "group":
+                continue
+            rect = pymupdf.Rect(bbox)
+            if bounds is None:
+                bounds = rect
+            else:
+                bounds.include_rect(rect)
+        assert bounds is not None
+        assert bounds.x0 >= 5.0 - 0.1
+        assert bounds.y0 >= 5.0 - 0.1
+        assert bounds.x1 <= page.rect.width - 5.0 + 0.1
+        assert bounds.y1 <= page.rect.height - 5.0 + 0.1
+        assert (page.rect.width, page.rect.height) == pytest.approx((200, 200))
+        assert "Entry" in page.get_text()
+        assert page.get_drawings()
 
 def test_double_mirror_is_close_to_idempotent(source_pdf: Path, tmp_path: Path):
     """Build plan §10: mirroring twice should return close to the source —
