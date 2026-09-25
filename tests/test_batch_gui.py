@@ -528,6 +528,7 @@ def test_source_only_jpeg_export_without_mirroring(qapp, tmp_path, monkeypatch):
 
 def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
     import pymupdf
+    from PySide6.QtWidgets import QLabel
     from spejl.gui.batch_dialogs import JpegExportDialog
     from spejl.gui.batch_model import BatchEntry
 
@@ -543,6 +544,9 @@ def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
     try:
         assert dialog._filename_labels[0].text() == source.name
         assert "#planName" in dialog.styleSheet()
+        mirrored_filename = dialog.findChild(QLabel, "mirroredFileName")
+        assert mirrored_filename is not None
+        assert mirrored_filename.text() == mirrored.name
         assert dialog.selected_items() == [(source, "source"), (source, "mirrored")]
         dialog._choices[0][2].setChecked(False)
         assert dialog.selected_items() == [(source, "mirrored")]

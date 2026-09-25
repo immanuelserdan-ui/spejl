@@ -67,6 +67,7 @@ class JpegExportDialog(QDialog):
                 border-radius: 5px; padding: 8px; font-weight: 600;
             }
             QLabel#displayName { color: #8CB3C0; padding: 4px 8px; }
+            QLabel#mirroredFileName { color: #EAF7FB; font-weight: 600; padding: 2px 4px; }
             QCheckBox { color: #D7EEF5; spacing: 6px; }
             QScrollArea, QWidget#exportBody { background: #07111F; }
             QWidget#exportCell { background: #0A1928; border: 1px solid #1F4D61; border-radius: 6px; }
@@ -110,6 +111,13 @@ class JpegExportDialog(QDialog):
                 cell_layout = QVBoxLayout(cell)
                 cell_layout.setContentsMargins(4, 4, 4, 4)
                 if path is not None and path.is_file():
+                    if kind == "mirrored":
+                        mirrored_name = QLabel(path.name)
+                        mirrored_name.setObjectName("mirroredFileName")
+                        mirrored_name.setWordWrap(True)
+                        mirrored_name.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+                        mirrored_name.setToolTip(str(path))
+                        cell_layout.addWidget(mirrored_name)
                     try:
                         preview = load_preview(path, dpi=54)
                     except Exception:

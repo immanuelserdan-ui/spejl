@@ -3,7 +3,7 @@ SPEJL - FULL OFFLINE WINDOWS INSTALLER
 Mirror floor-plan geometry while keeping text readable.
 
 INSTALL ON ANOTHER PC
-1. Copy Spejl-0.1.13-Windows-x64-Setup.exe to the other computer.
+1. Copy Spejl-0.1.14-Windows-x64-Setup.exe to the other computer.
 2. Double-click the installer and follow the setup wizard.
 3. Open Spejl from the Start menu or desktop shortcut.
 
