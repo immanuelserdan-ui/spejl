@@ -541,6 +541,8 @@ def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
     entry.output = mirrored
     dialog = JpegExportDialog([entry])
     try:
+        assert dialog._filename_labels[0].text() == source.name
+        assert "#planName" in dialog.styleSheet()
         assert dialog.selected_items() == [(source, "source"), (source, "mirrored")]
         dialog._choices[0][2].setChecked(False)
         assert dialog.selected_items() == [(source, "mirrored")]
