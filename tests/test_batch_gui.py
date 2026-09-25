@@ -538,18 +538,39 @@ def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
         with pymupdf.open() as doc:
             doc.new_page(width=200, height=200)
             doc.save(path)
+    # The generated temporary path includes an ordering/UUID prefix. The
+    # dialog should show the clean mirrored filename retained on the entry.
+    generated_output = tmp_path / f"0002_{'a' * 32}_{mirrored.name}"
+    generated_output.write_bytes(mirrored.read_bytes())
     entry = BatchEntry(source, mirrored.name)
-    entry.output = mirrored
+    entry.output = generated_output
     dialog = JpegExportDialog([entry])
     try:
-        assert dialog._filename_labels[0].text() == source.name
+        assert dialog._filename_labels[0].text() == f"{source.name}\n{mirrored.name}"
         assert "#planName" in dialog.styleSheet()
-        assert dialog._mirrored_filename_labels[0].text() == mirrored.name
-        assert dialog._mirrored_filename_labels[0].parentWidget() is dialog._filename_labels[0].parentWidget()
-        assert dialog.findChild(QLabel, "mirroredFileName") is None
+        assert dialog.findChild(QLabel, "mirroredPlanName") is None
+        assert "0002_" not in dialog._filename_labels[0].text()
         assert dialog.selected_items() == [(source, "source"), (source, "mirrored")]
         dialog._choices[0][2].setChecked(False)
         assert dialog.selected_items() == [(source, "mirrored")]
+    finally:
+        dialog.close()
+
+
+def test_jpeg_dialog_shows_only_source_name_before_mirroring(qapp, tmp_path):
+    import pymupdf
+    from spejl.gui.batch_dialogs import JpegExportDialog
+    from spejl.gui.batch_model import BatchEntry
+
+    source = tmp_path / "plan-R-V00.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page(width=200, height=200)
+        doc.save(source)
+    entry = BatchEntry(source, "plan-S-V00.pdf")
+    dialog = JpegExportDialog([entry])
+    try:
+        assert dialog._filename_labels[0].text() == source.name
+        assert "Not created yet" not in dialog._filename_labels[0].text()
     finally:
         dialog.close()
 
