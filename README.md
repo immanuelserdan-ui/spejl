@@ -111,10 +111,19 @@ Command line:
 `python -m spejl.cli mirror <file>` routes automatically — vector PDF
 takes Route A, raster PNG/JPEG takes Route B.
 
-**Desktop app is built.** A drop zone, axis picker, and side-by-side
-before/after preview over the same `mirror_pdf` / `mirror_raster` the
-CLI calls — no separate implementation to drift out of sync. Mirroring
-runs on a background thread so the window stays responsive during OCR.
+**Desktop app is built.** Its upload picker accepts PDF files only, and
+the editor rejects PDFs that contain embedded images because mirroring
+those pages through the raster fallback removes selectable text. The
+command-line interface continues to support raster PNG/JPEG inputs.
+Mirroring runs on a background thread so the window stays responsive.
+
+In the desktop app, right-click an Uploaded plan to remove it from the
+session, rename its display label, inspect file details, or preview its PDF.
+Mirror Plan opens a checklist so only the chosen uploads are processed.
+Save As shows source and available mirrored previews with separate checkboxes;
+it exports every page of each selected PDF as a 300 dpi JPEG, including
+sources that have not been mirrored. Existing JPEGs are kept, with a numeric
+suffix added to new exports that have the same name.
 
 ```bash
 python -m spejl.gui       # or: spejl-app, once installed

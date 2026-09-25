@@ -15,7 +15,7 @@ from PySide6.QtCore import QThread, Signal
 
 from spejl.models import Axis, Document, Route
 from spejl.qa.verify import VerifyReport
-from spejl.router import sniff_route
+from spejl.router import sniff_route, validate_native_vector_pdf
 
 
 class MirrorWorker(QThread):
@@ -35,18 +35,15 @@ class MirrorWorker(QThread):
             self.failed.emit(str(exc))
             return
 
+        if route is not Route.VECTOR:
+            self.failed.emit("Spejl accepts vector PDF files only; raster images are not supported.")
+            return
+
         try:
-            document: Document
-            if route is Route.VECTOR:
-                from spejl.vector.pdf_mirror import mirror_pdf
+            validate_native_vector_pdf(self.input_path)
+            from spejl.vector.pdf_mirror import mirror_pdf
 
-                document = mirror_pdf(self.input_path, self.output_path, axis=self.axis)
-            else:
-                from spejl.raster.pipeline import mirror_raster
-
-                document = mirror_raster(
-                    self.input_path, self.output_path, axis=self.axis
-                ).document
+            document: Document = mirror_pdf(self.input_path, self.output_path, axis=self.axis)
         except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
             self.failed.emit(str(exc))
             return

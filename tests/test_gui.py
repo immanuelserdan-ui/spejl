@@ -64,7 +64,7 @@ def test_source_and_mirrored_panes_render_at_the_same_scale(window, tmp_path):
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
     # Same pixmap on both sides (source==mirrored dimensions is the
     # common, no-upscale case) with DELIBERATELY unequal pane widths.
     window._mirrored_view.set_pixmap_source(window._source_view._source)
@@ -102,7 +102,7 @@ def test_mirror_button_actually_renders_its_accent_colour(window, tmp_path):
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
     window._mirror_button.setEnabled(True)  # exercise the enabled (accent-blue) paint path
     window.resize(1172, 750)
     window.show()
@@ -135,26 +135,26 @@ def test_window_constructs_with_expected_widgets(window):
     assert not window._progress.isVisible()
 
 
-def test_choosing_a_file_enables_mirror_and_shows_route(window, tmp_path):
+def test_choosing_a_vector_pdf_enables_mirror_and_shows_route(window, tmp_path):
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
 
-    assert window._input_path == info["png"]
+    assert window._input_path == info["pdf"].resolve()
     assert window._mirror_button.isEnabled()
     assert window._route_badge.isVisible()
-    assert "Raster" in window._route_badge.text()
+    assert "PDF" in window._route_badge.text()
 
 
-def test_choosing_a_pdf_shows_the_vector_route(window, tmp_path):
+def test_choosing_a_pdf_shows_native_text_support(window, tmp_path):
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
     window._on_file_chosen(info["pdf"])
 
     assert window._route_badge.isVisible()
-    assert "Vector" in window._route_badge.text()
+    assert "native text" in window._route_badge.text()
 
 
 def test_choosing_a_second_file_resets_prior_results(window, tmp_path):
@@ -164,49 +164,21 @@ def test_choosing_a_second_file_resets_prior_results(window, tmp_path):
     window._save_button.setEnabled(True)  # simulate a completed prior mirror
     window._flags_list.addItem("stale flag from a previous run")
 
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
 
-    assert window._save_button.isEnabled() is False
+    assert window._save_button.isEnabled() is True
     assert window._flags_list.count() == 0
     assert window._mirrored_view._source is None
 
 
-def test_mirror_failure_is_shown_not_raised(window, tmp_path, qapp):
-    """An unreadable file must surface via the failed signal and a
-    dialog, never as an unhandled exception on the Qt event loop."""
-    from PySide6.QtCore import QEventLoop, QTimer
-
-    bad = tmp_path / "not_a_real_image.png"
-    bad.write_bytes(b"\x89PNG\r\n\x1a\n" + b"\x00" * 20)  # valid magic, garbage body
+def test_non_pdf_upload_is_rejected(window, tmp_path):
+    bad = tmp_path / "not_a_vector_plan.png"
+    bad.write_bytes(b"image data")
     window._on_file_chosen(bad)
 
-    loop = QEventLoop()
-    outcome = {}
-
-    def on_fail(message: str) -> None:
-        outcome["failed"] = message
-        loop.quit()
-
-    def on_ok(document, route) -> None:
-        outcome["ok"] = True
-        loop.quit()
-
-    # Patch QMessageBox so the failure dialog doesn't block the test.
-    import spejl.gui.main_window as mw
-
-    original = mw.QMessageBox.critical
-    mw.QMessageBox.critical = staticmethod(lambda *a, **k: None)
-    try:
-        window._on_mirror_clicked()
-        window._worker.failed.connect(on_fail)
-        window._worker.succeeded.connect(on_ok)
-        QTimer.singleShot(15000, loop.quit)
-        loop.exec()
-    finally:
-        mw.QMessageBox.critical = original
-
-    assert "failed" in outcome, outcome
-    assert window._mirror_button.isEnabled()  # re-enabled after failure
+    assert window._input_path is None
+    assert window._batch_order == []
+    assert "vector PDF" in window._status_label.text()
 
 
 class _FakeRunningWorker:
@@ -240,14 +212,14 @@ def test_a_click_while_a_job_is_running_does_not_spawn_a_new_worker(window, tmp_
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
 
     running = _FakeRunningWorker()
     window._worker = running  # type: ignore[assignment]
 
     # A new file arriving while a job is (per the fake) still running
     # must not re-enable the button.
-    window._on_file_chosen(info["png"])
+    window._on_file_chosen(info["pdf"])
     assert not window._mirror_button.isEnabled()
 
     # And a click that reaches the handler anyway must refuse to start
@@ -256,7 +228,7 @@ def test_a_click_while_a_job_is_running_does_not_spawn_a_new_worker(window, tmp_
     assert window._worker is running, "a second worker was created while the first was still 'running'"
 
 
-def test_a_stale_jobs_result_does_not_overwrite_a_different_current_file(window, tmp_path):
+def test_a_stale_jobs_result_does_not_overwrite_a_different_current_file(window, tmp_path, monkeypatch):
     """The other half of the same fix: once a job's own file is no
     longer the one on screen (the user navigated away from it while it
     ran), its result must be silently discarded, not applied over
@@ -284,6 +256,7 @@ def test_a_stale_jobs_result_does_not_overwrite_a_different_current_file(window,
     observable state sidesteps needing to win that race at all.
     """
     from PySide6.QtCore import QCoreApplication
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
 
     from spejl.qa import fixture_gen
 
@@ -291,6 +264,7 @@ def test_a_stale_jobs_result_does_not_overwrite_a_different_current_file(window,
     window._on_file_chosen(info["pdf"])
     assert window._route_badge.property("route") == "vector"  # sanity: really Route.VECTOR
 
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", lambda self: 1)
     window._on_mirror_clicked()
     job_worker = window._worker
     assert job_worker is not None

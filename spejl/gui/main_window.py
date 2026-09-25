@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import tempfile
+from uuid import uuid4
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QThread, QTimer, QUrl, Qt
@@ -19,7 +20,9 @@ from PySide6.QtWidgets import (
     QListWidget,
     QListWidgetItem,
     QMainWindow,
+    QMenu,
     QMessageBox,
+    QInputDialog,
     QProgressBar,
     QPushButton,
     QRadioButton,
@@ -32,11 +35,12 @@ from PySide6.QtWidgets import (
 
 from spejl.gui.imaging import load_preview
 from spejl.gui.batch_model import BatchEntry, mirrored_filename
+from spejl.gui.batch_dialogs import JpegExportDialog, MirrorSelectionDialog, PdfPreviewDialog
 from spejl.gui.document_session import DocumentSession
 from spejl.gui.job_controller import MirrorJobController
 from spejl.gui.review_model import summarize_document, summarize_verification
 from spejl.gui.update_checker import UpdateCheckWorker, UpdateInfo
-from spejl.gui.widgets import DropZone, ScaledImageLabel
+from spejl.gui.widgets import DropZone, ScaledImageLabel, SUPPORTED_SUFFIXES
 from spejl.gui.worker import MirrorWorker, VerifyWorker
 from spejl.models import Axis, Document, Route
 from spejl.qa.verify import VerifyReport
@@ -305,6 +309,8 @@ class MainWindow(QMainWindow):
         uploaded_layout = QVBoxLayout(uploaded_box)
         self._uploaded_list = QListWidget()
         self._uploaded_list.setAlternatingRowColors(True)
+        self._uploaded_list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self._uploaded_list.customContextMenuRequested.connect(self._on_uploaded_context_menu)
         self._uploaded_list.currentItemChanged.connect(self._on_uploaded_item_selected)
         uploaded_layout.addWidget(self._uploaded_list)
         layout.addWidget(uploaded_box, stretch=1)
@@ -889,7 +895,11 @@ class MainWindow(QMainWindow):
 
     def _on_files_chosen(self, paths: list[Path]) -> None:
         added: list[Path] = []
+        rejected = 0
         for raw_path in paths:
+            if raw_path.suffix.lower() not in SUPPORTED_SUFFIXES or not raw_path.is_file():
+                rejected += 1
+                continue
             path = raw_path.resolve()
             if path in self._batch_entries:
                 continue
@@ -899,17 +909,22 @@ class MainWindow(QMainWindow):
             added.append(path)
         if not added:
             self._mirror_button.setEnabled(bool(self._batch_order) and not self._job_running())
-            self._status_label.setText("Those plans are already in the Uploaded list.")
+            self._status_label.setText(
+                "Only existing vector PDF files can be uploaded."
+                if rejected else "Those plans are already in the Uploaded list."
+            )
             return
         self._drop_zone.set_files(self._batch_order)
         self._refresh_batch_lists()
         self._select_batch_entry(added[0])
         self._mirror_button.setEnabled(not self._job_running())
         warnings = sum(self._batch_entries[path].naming_warning for path in added)
-        self._status_label.setText(
-            f"Added {len(added)} plan(s)."
-            + (f" {warnings} filename(s) have no R/S orientation field." if warnings else "")
-        )
+        status_parts = [f"Added {len(added)} plan(s)."]
+        if rejected:
+            status_parts.append(f"Skipped {rejected} non-PDF or missing file(s); upload vector PDFs only.")
+        if warnings:
+            status_parts.append(f"{warnings} filename(s) have no R/S orientation field.")
+        self._status_label.setText(" ".join(status_parts))
 
     def _on_file_chosen(self, path: Path) -> None:
         """Backward-compatible single-file entry point used by integrations/tests."""
@@ -924,7 +939,7 @@ class MainWindow(QMainWindow):
             marks = {"queued": "○", "processing": "◌", "completed": "✓", "failed": "✖"}
             for path in self._batch_order:
                 entry = self._batch_entries[path]
-                uploaded = QListWidgetItem(path.name)
+                uploaded = QListWidgetItem(entry.display_name or path.name)
                 uploaded.setData(Qt.ItemDataRole.UserRole, str(path))
                 uploaded.setToolTip(str(path))
                 self._uploaded_list.addItem(uploaded)
@@ -946,6 +961,90 @@ class MainWindow(QMainWindow):
 
     def _path_from_list_item(self, item: QListWidgetItem | None) -> Path | None:
         return Path(item.data(Qt.ItemDataRole.UserRole)) if item is not None else None
+
+    def _on_uploaded_context_menu(self, position) -> None:
+        item = self._uploaded_list.itemAt(position)
+        path = self._path_from_list_item(item)
+        if path is None or path not in self._batch_entries:
+            return
+        self._uploaded_list.setCurrentItem(item)
+        menu = QMenu(self)
+        remove = menu.addAction("Remove")
+        remove.setToolTip("Remove from this session; keep the original PDF on disk")
+        remove.setEnabled(not self._job_running())
+        rename = menu.addAction("Rename display name…")
+        properties = menu.addAction("View properties…")
+        preview = menu.addAction("Preview PDF…")
+        chosen = menu.exec(self._uploaded_list.viewport().mapToGlobal(position))
+        if chosen == remove:
+            self._remove_uploaded(path)
+        elif chosen == rename:
+            self._rename_uploaded(path)
+        elif chosen == properties:
+            self._show_uploaded_properties(path)
+        elif chosen == preview:
+            try:
+                PdfPreviewDialog(path, self).exec()
+            except Exception as exc:
+                QMessageBox.warning(self, "Preview unavailable", str(exc))
+
+    def _remove_uploaded(self, path: Path) -> None:
+        if self._job_running() or path not in self._batch_entries:
+            return
+        index = self._batch_order.index(path)
+        entry = self._batch_entries[path]
+        temp_root = Path(self._temp_dir.name).resolve()
+        for generated in (entry.output, entry.diff_overlay):
+            if generated is not None and generated.resolve().is_relative_to(temp_root):
+                generated.unlink(missing_ok=True)
+        del self._batch_entries[path]
+        self._batch_order.remove(path)
+        self._batch_queue = [queued for queued in self._batch_queue if queued != path]
+        if not self._batch_order:
+            self._clear_session()
+            return
+        selected = self._input_path if self._input_path in self._batch_entries else None
+        if selected is None:
+            self._input_path = None
+            selected = self._batch_order[min(index, len(self._batch_order) - 1)]
+        self._drop_zone.set_files(self._batch_order)
+        self._refresh_batch_lists()
+        self._select_batch_entry(selected)
+        self._status_label.setText(f"Removed {path.name} from Uploaded. The original PDF remains on disk.")
+
+    def _rename_uploaded(self, path: Path) -> None:
+        entry = self._batch_entries[path]
+        value, accepted = QInputDialog.getText(
+            self, "Rename display name", "Display name:", text=entry.display_name or path.name,
+        )
+        if accepted and value.strip():
+            entry.display_name = value.strip()
+            self._refresh_batch_lists()
+            if self._input_path == path:
+                self._source_filename_label.setText(entry.display_name)
+
+    def _show_uploaded_properties(self, path: Path) -> None:
+        import pymupdf
+
+        entry = self._batch_entries[path]
+        try:
+            with pymupdf.open(str(path)) as document:
+                page_count = document.page_count
+                sizes = [(round(page.rect.width, 1), round(page.rect.height, 1))
+                         for page in document]
+            dimensions = ", ".join(f"{w} × {h} pt" for w, h in sizes[:4])
+            if len(sizes) > 4:
+                dimensions += f" (+{len(sizes) - 4} pages)"
+            details = (
+                f"Display name: {entry.display_name or path.name}\n"
+                f"File: {path.name}\nLocation: {path.parent}\n"
+                f"Size: {path.stat().st_size:,} bytes ({path.stat().st_size / 1024:.1f} KB)\n"
+                f"Pages: {page_count}\nPage dimensions: {dimensions}\n"
+                f"Uploaded: {entry.uploaded_at:%Y-%m-%d %H:%M:%S}"
+            )
+            QMessageBox.information(self, "PDF properties", details)
+        except Exception as exc:
+            QMessageBox.warning(self, "Properties unavailable", str(exc))
 
     def _on_uploaded_item_selected(self, current: QListWidgetItem | None, _previous=None) -> None:
         if not self._selecting_batch_item and (path := self._path_from_list_item(current)):
@@ -984,13 +1083,13 @@ class MainWindow(QMainWindow):
         self._document_session.page_index = min(entry.page_index, self._document_session.page_count - 1)
         self._update_page_navigation()
         self._drop_zone.set_file(path)
-        self._source_filename_label.setText(path.name)
+        self._source_filename_label.setText(entry.display_name or path.name)
         self._source_filename_label.setToolTip(str(path))
         self._mirrored_filename_label.setText(entry.mirrored_name if entry.output else "Waiting to be mirrored")
         self._mirrored_filename_label.setToolTip(entry.mirrored_name)
         self._mirror_button.setEnabled(bool(self._batch_order) and not self._job_running())
         completed = entry.status == "completed" and entry.output is not None
-        self._save_button.setEnabled(completed)
+        self._save_button.setEnabled(bool(self._batch_order) and not self._job_running())
         self._verify_button.setEnabled(completed and entry.route is Route.RASTER)
         self._view_diff_button.setEnabled(entry.diff_overlay is not None)
         self._mirrored_view.set_pixmap_source(
@@ -1034,7 +1133,7 @@ class MainWindow(QMainWindow):
 
     def _show_route_badge(self, route: Route | None) -> None:
         if route is Route.VECTOR:
-            self._route_badge.setText("Vector PDF — best accuracy; geometry and text stay editable")
+            self._route_badge.setText("PDF input — native text remains editable")
             self._route_badge.setProperty("route", "vector")
         elif route is Route.RASTER:
             self._route_badge.setText("Raster input — review text and geometry before saving")
@@ -1059,8 +1158,15 @@ class MainWindow(QMainWindow):
             # (a second worker silently orphaning the first, still-
             # running one) this and that guard together close off.
             return
+        dialog = MirrorSelectionDialog([self._batch_entries[path] for path in self._batch_order], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
+            return
+        selected = dialog.selected_paths()
+        if not selected:
+            self._status_label.setText("Select at least one PDF to mirror.")
+            return
         self._batch_axis = next(a for a, btn in self._axis_buttons.items() if btn.isChecked())
-        self._batch_queue = list(self._batch_order)
+        self._batch_queue = selected
         self._mirror_button.setEnabled(False)
         self._save_button.setEnabled(False)
         self._progress.show()
@@ -1080,6 +1186,7 @@ class MainWindow(QMainWindow):
             self._progress.hide()
             self._cancel_button.hide()
             self._mirror_button.setEnabled(bool(self._batch_order))
+            self._save_button.setEnabled(bool(self._batch_order))
             completed = sum(entry.status == "completed" for entry in self._batch_entries.values())
             failed = sum(entry.status == "failed" for entry in self._batch_entries.values())
             self._status_label.setText(f"Batch complete: {completed} mirrored" + (f", {failed} failed" if failed else ""))
@@ -1089,7 +1196,7 @@ class MainWindow(QMainWindow):
         entry.status = "processing"
         self._active_batch_path = job_input
         index = self._batch_order.index(job_input)
-        output_path = Path(self._temp_dir.name) / f"{index:04d}_{entry.mirrored_name}"
+        output_path = Path(self._temp_dir.name) / f"{index:04d}_{uuid4().hex}_{entry.mirrored_name}"
         self._status_label.setText(f"Mirroring {index + 1} of {len(self._batch_order)}: {job_input.name}")
         self._refresh_batch_lists()
         self._worker = self._job_controller.start(job_input, output_path, self._batch_axis or Axis.VERTICAL)
@@ -1117,7 +1224,7 @@ class MainWindow(QMainWindow):
             self._output_path = document.output
             self._output_axis = document.axis
             self._output_route = route
-            self._save_button.setEnabled(True)
+            self._save_button.setEnabled(False)
             self._mirrored_filename_label.setText(entry.mirrored_name)
             self._reset_mirrored_view()
         # Verify re-detects text on the SOURCE to know what to exclude
@@ -1178,6 +1285,7 @@ class MainWindow(QMainWindow):
         self._progress.hide()
         self._cancel_button.hide()
         self._mirror_button.setEnabled(bool(self._batch_order))
+        self._save_button.setEnabled(bool(self._batch_order))
         self._review_summary.setText("Mirror cancelled — source remains unchanged")
         self._flags_list.clear()
         self._on_deferred_clear_ready()
@@ -1335,25 +1443,59 @@ class MainWindow(QMainWindow):
         self._status_label.setText(f"Review item selected: {item.text()}")
 
     def _on_save_clicked(self) -> None:
-        if self._output_path is None or self._input_path is None:
+        if not self._batch_order or self._job_running():
             return
-        entry = self._batch_entries.get(self._input_path)
-        mirrored_name = entry.mirrored_name if entry else self._output_path.name
-        suggested = str(self._input_path.with_name(Path(mirrored_name).stem + ".jpg"))
-        path_str, _selected_filter = QFileDialog.getSaveFileName(
-            self, "Save mirrored page as JPEG", suggested,
-            "JPEG image (*.jpg *.jpeg)",
-        )
-        if not path_str:
+        dialog = JpegExportDialog([self._batch_entries[path] for path in self._batch_order], self)
+        if dialog.exec() != QDialog.DialogCode.Accepted:
             return
-        dest = Path(path_str)
-        if not dest.suffix:
-            dest = dest.with_suffix(".jpg")
-        if dest.suffix.lower() not in {".jpg", ".jpeg"}:
-            QMessageBox.warning(self, "JPEG required", "Save As exports a JPEG file. Choose .jpg or .jpeg.")
+        choices = dialog.selected_items()
+        if not choices:
+            self._status_label.setText("Select at least one source or mirrored PDF to export.")
             return
-        self._export_mirrored_image(dest)
-        self._status_label.setText(f"Saved to {dest.name}")
+        directory = QFileDialog.getExistingDirectory(self, "Choose JPEG export folder", str(self._input_path.parent))
+        if not directory:
+            return
+        exported, errors = self._export_selected_jpegs(choices, Path(directory))
+        self._status_label.setText(f"Exported {len(exported)} JPEG(s) to {directory}" +
+                                   (f"; {len(errors)} failed" if errors else ""))
+        if errors:
+            QMessageBox.warning(self, "Some JPEGs could not be exported", "\n".join(errors[:10]))
+
+    def _export_selected_jpegs(self, choices: list[tuple[Path, str]], directory: Path) -> tuple[list[Path], list[str]]:
+        """Export every page of the selected PDFs without overwriting existing files."""
+        import pymupdf
+        from PIL import Image
+
+        directory.mkdir(parents=True, exist_ok=True)
+        exported: list[Path] = []
+        errors: list[str] = []
+        for source, kind in choices:
+            entry = self._batch_entries.get(source)
+            if entry is None:
+                continue
+            pdf = entry.source if kind == "source" else entry.output
+            if pdf is None:
+                continue
+            stem = entry.source.stem if kind == "source" else Path(entry.mirrored_name).stem
+            try:
+                with pymupdf.open(str(pdf)) as document:
+                    if document.page_count == 0:
+                        raise ValueError("PDF has no pages")
+                    for index, page in enumerate(document):
+                        page_suffix = f"_p{index + 1:02d}" if document.page_count > 1 else ""
+                        base = f"{stem}{page_suffix}"
+                        destination = directory / f"{base}.jpg"
+                        counter = 2
+                        while destination.exists():
+                            destination = directory / f"{base}_{counter}.jpg"
+                            counter += 1
+                        pixmap = page.get_pixmap(dpi=300, alpha=False)
+                        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+                        image.save(destination, format="JPEG", quality=95, subsampling=0)
+                        exported.append(destination)
+            except Exception as exc:
+                errors.append(f"{kind.title()} {entry.display_name or source.name}: {exc}")
+        return exported, errors
 
     def _export_mirrored_image(self, destination: Path) -> None:
         """Render a PDF export at print quality or convert an image output."""
