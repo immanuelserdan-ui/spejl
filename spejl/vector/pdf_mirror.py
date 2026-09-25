@@ -27,6 +27,8 @@ from spejl.transform import mirror as M
 # would be free to drift, and it is the rule the whole tool turns on.
 _mirror_point = M.mirror_point
 
+_MIN_PAGE_CONTENT_MARGIN_PT = 5.0
+
 # Font-family fallback: CAD-exported PDFs overwhelmingly set a
 # Helvetica/Arial-alike, so that is the default; a document that
 # clearly asks for a serif or monospace face gets one. Exact family
@@ -46,6 +48,7 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
     output.
     """
     result = Document(source=input_path, output=output_path, axis=axis, route=Route.VECTOR)
+    fitted_pages: set[int] = set()
 
     src = pymupdf.open(str(input_path))
     pike_src = pikepdf.Pdf.open(str(input_path))
@@ -104,6 +107,14 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
                 _pdf_reflection_matrix(pike_src.pages[page_index], axis),
             )
 
+            fitted_stream, did_fit = _fit_page_content_stream(
+                new_page, transformed, width=W, height=H,
+            )
+            if did_fit:
+                out.update_stream(xref, fitted_stream)
+                new_page.set_contents(xref)
+                fitted_pages.add(page_index)
+
             result.pages.append(
                 PageResult(
                     index=page_index,
@@ -133,6 +144,20 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
                     )
                 if not _pixmap_has_ink(pix):
                     blank_pages.append(page_index)
+                if page_index in fitted_pages:
+                    bounds = _page_visible_content_bounds(written_page)
+                    margin = _MIN_PAGE_CONTENT_MARGIN_PT
+                    tolerance = 0.1
+                    if bounds is not None and (
+                        bounds.x0 < margin - tolerance
+                        or bounds.y0 < margin - tolerance
+                        or bounds.x1 > written_page.rect.width - margin + tolerance
+                        or bounds.y1 > written_page.rect.height - margin + tolerance
+                    ):
+                        raise VectorTextTransformError(
+                            f"Fitted page {page_index + 1} still has content inside the "
+                            f"{margin:g}-point safety margin."
+                        )
         if blank_pages:
             # A few CAD exporters produce a page whose resource graph cannot
             # survive stream replacement even though text extraction works.
@@ -146,6 +171,66 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
         pike_src.close()
 
     return result
+
+
+def _page_visible_content_bounds(page: pymupdf.Page) -> pymupdf.Rect | None:
+    """Union visible PDF object bounds, including strokes and text glyphs."""
+    bounds: pymupdf.Rect | None = None
+    for kind, bbox in page.get_bboxlog():
+        if kind.startswith("clip-") or kind == "group":
+            continue
+        rect = pymupdf.Rect(bbox)
+        if rect.is_empty or not rect.is_valid:
+            continue
+        if bounds is None:
+            bounds = rect
+        else:
+            bounds.include_rect(rect)
+    return bounds
+
+
+def _fit_page_content_stream(
+    page: pymupdf.Page,
+    content: bytes,
+    *,
+    width: float,
+    height: float,
+    margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
+) -> tuple[bytes, bool]:
+    """Translate/scale page graphics just enough to keep them 5pt in-bounds.
+
+    A uniform fit keeps walls, door swings, dimensions, and text aligned. The
+    existing page size is retained; content is only changed when its rendered
+    bounds cross the safety inset. Rotated PDF pages use a different default
+    user-space basis, so they are left untouched rather than risk a bad CTM.
+    """
+    if page.rotation or width <= 2 * margin or height <= 2 * margin:
+        return content, False
+    bounds = _page_visible_content_bounds(page)
+    if bounds is None:
+        return content, False
+    safe = pymupdf.Rect(margin, margin, width - margin, height - margin)
+    tolerance = 0.05
+    if (
+        bounds.x0 >= safe.x0 - tolerance
+        and bounds.y0 >= safe.y0 - tolerance
+        and bounds.x1 <= safe.x1 + tolerance
+        and bounds.y1 <= safe.y1 + tolerance
+    ):
+        return content, False
+
+    scale = min(
+        1.0,
+        safe.width / max(bounds.width, 1e-6),
+        safe.height / max(bounds.height, 1e-6),
+    )
+    dx = safe.x0 + (safe.width - bounds.width * scale) / 2 - bounds.x0 * scale
+    dy = safe.y0 + (safe.height - bounds.height * scale) / 2 - bounds.y0 * scale
+    # PDF's default user space has its origin at the bottom-left, while the
+    # bounds above use PyMuPDF's top-left page coordinates.
+    pdf_dy = height * (1 - scale) - dy
+    matrix = f"q\n{scale:.10f} 0 0 {scale:.10f} {dx:.10f} {pdf_dy:.10f} cm\n".encode("ascii")
+    return matrix + content + b"\nQ\n", True
 
 
 def remove_pdf_text_runs(
