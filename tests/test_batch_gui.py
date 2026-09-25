@@ -13,6 +13,33 @@ pytest.importorskip("PySide6")
 from spejl.gui.batch_model import mirrored_filename
 
 
+def test_desktop_upload_accepts_pdf_only(tmp_path):
+    from spejl.gui.widgets import DropZone, SUPPORTED_SUFFIXES
+
+    pdf = tmp_path / "vector.pdf"
+    image = tmp_path / "scan.png"
+    pdf.touch()
+    image.touch()
+
+    class Url:
+        def __init__(self, path):
+            self.path = path
+
+        def toLocalFile(self):
+            return str(self.path)
+
+    class Mime:
+        def urls(self):
+            return [Url(pdf), Url(image)]
+
+    class Event:
+        def mimeData(self):
+            return Mime()
+
+    assert SUPPORTED_SUFFIXES == (".pdf",)
+    assert DropZone._supported_paths(Event()) == [pdf]
+
+
 @pytest.fixture(scope="module")
 def qapp():
     from PySide6.QtWidgets import QApplication
@@ -46,9 +73,9 @@ def test_multiple_files_are_listed_and_selectable(qapp, tmp_path):
 
     info = fixture_gen.generate(tmp_path, dpi=100)
     first = tmp_path / "634-T01-A00-R-V00-R00.pdf"
-    second = tmp_path / "634-T02-A00-S-V20-R00.png"
+    second = tmp_path / "634-T02-A00-S-V20-R00.pdf"
     first.write_bytes(info["pdf"].read_bytes())
-    second.write_bytes(info["png"].read_bytes())
+    second.write_bytes(info["pdf"].read_bytes())
     window = MainWindow()
     try:
         window._on_files_chosen([first, second, first])
@@ -356,9 +383,10 @@ def test_zoom_renders_pdf_previews_at_higher_resolution(qapp, tmp_path):
         window.close()
 
 
-def test_batch_processes_every_pdf_and_keeps_results(qapp, tmp_path):
+def test_batch_processes_every_pdf_and_keeps_results(qapp, tmp_path, monkeypatch):
     from PySide6.QtCore import QCoreApplication
     from spejl.gui.main_window import MainWindow
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
     from spejl.qa import fixture_gen
 
     info = fixture_gen.generate(tmp_path, dpi=100)
@@ -370,6 +398,7 @@ def test_batch_processes_every_pdf_and_keeps_results(qapp, tmp_path):
     window = MainWindow()
     try:
         window._on_files_chosen(paths)
+        monkeypatch.setattr(MirrorSelectionDialog, "exec", lambda self: 1)
         window._on_mirror_clicked()
         for _ in range(500):
             QCoreApplication.processEvents()
@@ -390,20 +419,15 @@ def test_batch_processes_every_pdf_and_keeps_results(qapp, tmp_path):
 
 def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
     from spejl.gui.main_window import MainWindow
+    from spejl.gui.batch_dialogs import JpegExportDialog
     from spejl.qa import fixture_gen
     import spejl.gui.main_window as main_window_module
 
     info = fixture_gen.generate(tmp_path, dpi=100)
     source = tmp_path / "634-T01-A00-R-V00-R00.pdf"
     source.write_bytes(info["pdf"].read_bytes())
-    destination = tmp_path / "chosen.jpg"
-    proposed = {}
-
-    def choose(_parent, _title, suggested, _file_filter):
-        proposed["path"] = suggested
-        return str(destination), "JPEG image (*.jpg *.jpeg)"
-
-    monkeypatch.setattr(main_window_module.QFileDialog, "getSaveFileName", choose)
+    monkeypatch.setattr(JpegExportDialog, "exec", lambda self: 1)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_: str(tmp_path))
     window = MainWindow()
     try:
         window._on_file_chosen(source)
@@ -412,8 +436,137 @@ def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
         entry.status = "completed"
         window._select_batch_entry(source.resolve())
         window._on_save_clicked()
-        assert proposed["path"].endswith("634-T01-A00-S-V00-R00.jpg")
-        assert destination.is_file()
-        assert destination.read_bytes().startswith(b"\xff\xd8")
+        source_jpeg = tmp_path / "634-T01-A00-R-V00-R00.jpg"
+        mirror_jpeg = tmp_path / "634-T01-A00-S-V00-R00.jpg"
+        assert source_jpeg.read_bytes().startswith(b"\xff\xd8")
+        assert mirror_jpeg.read_bytes().startswith(b"\xff\xd8")
+    finally:
+        window.close()
+
+
+def test_mirror_dialog_returns_only_checked_uploads(qapp, tmp_path):
+    import pymupdf
+    from PySide6.QtCore import Qt
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.batch_model import BatchEntry
+
+    paths = [tmp_path / f"plan-{index}.pdf" for index in range(2)]
+    for path in paths:
+        with pymupdf.open() as doc:
+            doc.new_page()
+            doc.save(path)
+    dialog = MirrorSelectionDialog([BatchEntry(path, path.name) for path in paths])
+    try:
+        dialog.list.item(1).setCheckState(Qt.CheckState.Unchecked)
+        assert dialog.selected_paths() == [paths[0]]
+    finally:
+        dialog.close()
+
+
+def test_only_checked_plan_is_mirrored(qapp, tmp_path, monkeypatch):
+    import pymupdf
+    from PySide6.QtCore import QCoreApplication, Qt
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.main_window import MainWindow
+
+    paths = [tmp_path / f"plan-{index}-R-V00.pdf" for index in range(2)]
+    for path in paths:
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=200, height=200)
+            page.insert_text((20, 50), "Room")
+            doc.save(path)
+
+    def accept_first(dialog):
+        dialog.list.item(1).setCheckState(Qt.CheckState.Unchecked)
+        return 1
+
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", accept_first)
+    window = MainWindow()
+    try:
+        window._on_files_chosen(paths)
+        window._on_mirror_clicked()
+        for _ in range(400):
+            QCoreApplication.processEvents()
+            if window._worker is not None and not window._worker.isRunning():
+                QCoreApplication.processEvents()
+                break
+            if window._worker is not None:
+                window._worker.wait(10)
+        first, second = (window._batch_entries[path.resolve()] for path in paths)
+        assert first.status == "completed" and first.output is not None
+        assert second.status == "queued" and second.output is None
+    finally:
+        window.close()
+
+
+def test_source_only_jpeg_export_without_mirroring(qapp, tmp_path, monkeypatch):
+    import pymupdf
+    from spejl.gui.batch_dialogs import JpegExportDialog
+    from spejl.gui.main_window import MainWindow
+    import spejl.gui.main_window as main_window_module
+
+    source = tmp_path / "source-R-V00.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page(width=200, height=300)
+        doc.new_page(width=300, height=200)
+        doc.save(source)
+    export_dir = tmp_path / "export"
+    monkeypatch.setattr(JpegExportDialog, "exec", lambda self: 1)
+    monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_: str(export_dir))
+    window = MainWindow()
+    try:
+        window._on_file_chosen(source)
+        assert window._save_button.isEnabled()
+        window._on_save_clicked()
+        assert (export_dir / "source-R-V00_p01.jpg").read_bytes().startswith(b"\xff\xd8")
+        assert (export_dir / "source-R-V00_p02.jpg").read_bytes().startswith(b"\xff\xd8")
+        window._on_save_clicked()
+        assert (export_dir / "source-R-V00_p01_2.jpg").exists()
+    finally:
+        window.close()
+
+
+def test_jpeg_dialog_can_choose_source_or_mirror_independently(qapp, tmp_path):
+    import pymupdf
+    from spejl.gui.batch_dialogs import JpegExportDialog
+    from spejl.gui.batch_model import BatchEntry
+
+    source = tmp_path / "plan-R-V00.pdf"
+    mirrored = tmp_path / "plan-S-V00.pdf"
+    for path in (source, mirrored):
+        with pymupdf.open() as doc:
+            doc.new_page(width=200, height=200)
+            doc.save(path)
+    entry = BatchEntry(source, mirrored.name)
+    entry.output = mirrored
+    dialog = JpegExportDialog([entry])
+    try:
+        assert dialog.selected_items() == [(source, "source"), (source, "mirrored")]
+        dialog._choices[0][2].setChecked(False)
+        assert dialog.selected_items() == [(source, "mirrored")]
+    finally:
+        dialog.close()
+
+
+def test_remove_uploaded_keeps_source_and_rename_changes_display_only(qapp, tmp_path, monkeypatch):
+    import pymupdf
+    from spejl.gui.main_window import MainWindow
+    import spejl.gui.main_window as main_window_module
+
+    source = tmp_path / "plan-R-V00.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page()
+        doc.save(source)
+    window = MainWindow()
+    try:
+        window._on_file_chosen(source)
+        monkeypatch.setattr(main_window_module.QInputDialog, "getText", lambda *_args, **_kwargs: ("Kitchen plan", True))
+        window._rename_uploaded(source.resolve())
+        assert window._uploaded_list.item(0).text() == "Kitchen plan"
+        assert window._source_filename_label.text() == "Kitchen plan"
+        assert source.name == "plan-R-V00.pdf"
+        window._remove_uploaded(source.resolve())
+        assert source.exists()
+        assert window._uploaded_list.count() == 0
     finally:
         window.close()

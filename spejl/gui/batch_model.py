@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 import re
 
@@ -33,6 +34,8 @@ class BatchEntry:
     source: Path
     mirrored_name: str
     naming_warning: bool = False
+    display_name: str | None = None
+    uploaded_at: datetime = field(default_factory=datetime.now)
     status: str = "queued"
     output: Path | None = None
     document: Document | None = None

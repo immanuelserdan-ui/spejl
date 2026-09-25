@@ -28,8 +28,8 @@ class OnboardingOverlay(QFrame):
         title.setWordWrap(True)
         layout.addWidget(title)
         text = QLabel(
-            "Drop a PDF or image into the left panel. Spejl mirrors the drawing while "
-            "preserving readable text, then shows source and result side by side."
+            "Drop an image-free vector PDF into the left panel. Spejl mirrors the drawing "
+            "while preserving embedded text; outlined lettering remains drawing geometry."
         )
         text.setObjectName("onboardingText")
         text.setWordWrap(True)

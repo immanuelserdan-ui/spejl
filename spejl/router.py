@@ -47,3 +47,34 @@ def sniff_route(path: Path) -> Route:
         f"{path}: unrecognised format — expected a vector PDF or a raster "
         "image (PNG/JPEG/TIFF/BMP)."
     )
+
+
+def validate_native_vector_pdf(path: Path) -> None:
+    """Reject raster and image-bearing PDFs in the desktop editor.
+
+    A PDF can contain full-page scans or a mixture of raster images and
+    vector text. Spejl's general-purpose mirror engine can process those
+    through its raster fallback, but that removes selectable text. The
+    desktop editing workflow calls this before mirroring so its uploaded
+    plans remain eligible for vector text editing.
+    """
+    if path.suffix.lower() != ".pdf":
+        raise ValueError("Spejl accepts vector PDF files only.")
+
+    import pymupdf
+
+    try:
+        with pymupdf.open(str(path)) as document:
+            if document.page_count == 0:
+                raise ValueError(f"{path.name}: the PDF has no pages.")
+            for page_index, page in enumerate(document):
+                if page.get_image_info():
+                    raise ValueError(
+                        f"{path.name}, page {page_index + 1}: contains embedded image content. "
+                        "Scanned and mixed image/vector PDFs cannot retain editable text; "
+                        "export an image-free vector PDF and try again."
+                    )
+    except ValueError:
+        raise
+    except Exception as exc:
+        raise ValueError(f"{path.name}: could not read as a valid PDF ({exc}).") from exc

@@ -8,7 +8,7 @@ from PySide6.QtCore import QPointF, QRectF, QSize, Qt, Signal
 from PySide6.QtGui import QColor, QDragEnterEvent, QDropEvent, QKeyEvent, QMouseEvent, QPainter, QPen, QPixmap, QWheelEvent
 from PySide6.QtWidgets import QFileDialog, QFrame, QLabel, QVBoxLayout, QWidget
 
-SUPPORTED_SUFFIXES = (".pdf", ".png", ".jpg", ".jpeg", ".tif", ".tiff", ".bmp")
+SUPPORTED_SUFFIXES = (".pdf",)
 
 
 class DropZone(QFrame):
@@ -33,7 +33,7 @@ class DropZone(QFrame):
         self._title = QLabel("Drop plans here, or click to browse")
         self._title.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._title.setWordWrap(True)
-        self._subtitle = QLabel("Best accuracy: Vector PDF from Revit (Vector Processing)")
+        self._subtitle = QLabel("Vector PDF only — image-free pages keep text editable")
         self._subtitle.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._subtitle.setWordWrap(True)
         # Styled inline, not via an ancestor's ID-selector rule: DropZone
@@ -46,7 +46,7 @@ class DropZone(QFrame):
         layout.addWidget(self._icon)
         layout.addWidget(self._title)
         layout.addWidget(self._subtitle)
-        self._formats = QLabel("Also supported: PNG · JPEG · TIFF · BMP — review required")
+        self._formats = QLabel("Scans and mixed image PDFs are rejected; outlined lettering is not editable text")
         self._formats.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self._formats.setWordWrap(True)
         self._formats.setStyleSheet("color: #8CB3C0; font-size: 10px;")
@@ -68,7 +68,7 @@ class DropZone(QFrame):
     def clear(self) -> None:
         """Restore the empty-file prompt after clearing the current session."""
         self._title.setText("Drop plans here, or click to browse")
-        self._subtitle.setText("Best accuracy: Vector PDF from Revit (Vector Processing)")
+        self._subtitle.setText("Vector PDF only — image-free pages keep text editable")
 
     def _update_style(self, active: bool) -> None:
         border = "#4FC3E0" if active else "#2B6479"
@@ -106,7 +106,7 @@ class DropZone(QFrame):
         """Open the normal file picker; shared by click and shortcuts."""
         exts = " ".join(f"*{s}" for s in SUPPORTED_SUFFIXES)
         path_strings, _filter = QFileDialog.getOpenFileNames(
-            self, "Choose floor plans", "", f"Floor plans ({exts});;All files (*)"
+            self, "Choose vector PDF floor plans", "", f"Vector PDF files ({exts})"
         )
         if path_strings:
             self.files_chosen.emit([Path(path) for path in path_strings])

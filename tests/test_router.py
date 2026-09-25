@@ -8,7 +8,7 @@ from __future__ import annotations
 import pytest
 
 from spejl.models import Route
-from spejl.router import sniff_route
+from spejl.router import sniff_route, validate_native_vector_pdf
 
 
 def test_pdf_suffix_routes_to_vector(tmp_path):
@@ -41,3 +41,39 @@ def test_unrecognised_extensionless_file_is_reported_not_guessed(tmp_path):
     path.write_bytes(b"just some plain text, no known magic bytes here")
     with pytest.raises(ValueError, match="unrecognised format"):
         sniff_route(path)
+
+
+def test_native_vector_pdf_passes_desktop_validation(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    path = tmp_path / "vector-plan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    page.insert_text((40, 50), "Room 1")
+    doc.save(path)
+    doc.close()
+
+    validate_native_vector_pdf(path)
+
+
+def test_pdf_with_embedded_image_is_rejected_for_desktop_editing(tmp_path):
+    pymupdf = pytest.importorskip("pymupdf")
+    path = tmp_path / "mixed-plan.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page()
+    image = pymupdf.Pixmap(pymupdf.csRGB, pymupdf.IRect(0, 0, 2, 2), 0)
+    image.clear_with(255)
+    page.insert_image(pymupdf.Rect(30, 30, 100, 100), pixmap=image)
+    page.insert_text((40, 120), "Vector label")
+    doc.save(path)
+    doc.close()
+
+    with pytest.raises(ValueError, match="embedded image content"):
+        validate_native_vector_pdf(path)
+
+
+def test_raster_file_is_rejected_by_desktop_validation(tmp_path):
+    path = tmp_path / "plan.png"
+    path.write_bytes(b"not relevant")
+
+    with pytest.raises(ValueError, match="vector PDF files only"):
+        validate_native_vector_pdf(path)
