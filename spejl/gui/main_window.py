@@ -112,8 +112,9 @@ QPushButton#verifyButton:hover:!disabled {{ background: #14364C; }}
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, *, embedded: bool = False) -> None:
         super().__init__()
+        self._embedded = embedded
         self.setWindowTitle("Spejl — mirror floor plans without mirroring the text")
         self.resize(1180, 720)
         self.setStyleSheet(_STYLESHEET)
@@ -152,18 +153,30 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(central)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-        outer.addWidget(self._build_window_header())
+        if not embedded:
+            outer.addWidget(self._build_window_header())
 
         content = QWidget()
         root = QHBoxLayout(content)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        root.addWidget(self._build_sidebar())
+        sidebar = self._build_sidebar()
+        if embedded:
+            sidebar_scroll = QScrollArea()
+            sidebar_scroll.setWidget(sidebar)
+            sidebar_scroll.setWidgetResizable(False)
+            sidebar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+            sidebar_scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+            sidebar_scroll.setFixedWidth(300)
+            root.addWidget(sidebar_scroll)
+        else:
+            root.addWidget(sidebar)
         root.addWidget(self._build_preview_area(), stretch=1)
         outer.addWidget(content, stretch=1)
         self._install_shortcuts()
-        QTimer.singleShot(1500, self._check_for_updates)
+        if not embedded:
+            QTimer.singleShot(1500, self._check_for_updates)
 
     def _install_shortcuts(self) -> None:
         """Discoverable desktop conventions; each delegates to existing UI actions."""
@@ -171,7 +184,8 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence.StandardKey.Save, self, activated=self._on_save_clicked)
         QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._on_mirror_clicked)
         QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_mirrored_view)
-        QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
+        if not self._embedded:
+            QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
 
     def _check_for_updates(self) -> None:
         if self._update_thread is not None:
@@ -259,7 +273,7 @@ class MainWindow(QMainWindow):
     def _build_sidebar(self) -> QWidget:
         sidebar = QWidget()
         sidebar.setObjectName("sidebar")  # styled from _STYLESHEET, not a call here — see its comment
-        sidebar.setFixedWidth(300)
+        sidebar.setFixedWidth(280 if self._embedded else 300)
         layout = QVBoxLayout(sidebar)
         layout.setContentsMargins(18, 18, 18, 18)
         layout.setSpacing(14)

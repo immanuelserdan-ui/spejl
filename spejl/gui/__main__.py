@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import os
 import json
+import ctypes
 from pathlib import Path
 
 from PySide6.QtCore import QEasingCurve, QPropertyAnimation, QTimer, Qt
@@ -14,7 +15,49 @@ from spejl.gui.main_window import MainWindow
 from spejl.gui.splash import StartupSplash
 
 
+def run_embedded(parent_hwnd: int) -> int:
+    """Host the full editor inside OmniBIM's native child window on Windows."""
+    if sys.platform != "win32" or parent_hwnd <= 0:
+        raise ValueError("Embedding requires a valid Windows parent window")
+
+    app = QApplication(sys.argv)
+    app.setApplicationName("Spejl")
+    window = MainWindow(embedded=True)
+    window.setWindowFlags(Qt.WindowType.Window | Qt.WindowType.FramelessWindowHint)
+    child_hwnd = int(window.winId())
+
+    user32 = ctypes.WinDLL("user32", use_last_error=True)
+    user32.GetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int]
+    user32.GetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetWindowLongPtrW.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_ssize_t]
+    user32.SetWindowLongPtrW.restype = ctypes.c_ssize_t
+    user32.SetParent.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
+    user32.SetParent.restype = ctypes.c_void_p
+    user32.SetWindowPos.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int,
+                                   ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_uint]
+    user32.SetWindowPos.restype = ctypes.c_int
+
+    gwl_style = -16
+    ws_child, ws_popup = 0x40000000, 0x80000000
+    ws_chrome = 0x00CF0000
+    style = user32.GetWindowLongPtrW(child_hwnd, gwl_style)
+    user32.SetWindowLongPtrW(child_hwnd, gwl_style, (style | ws_child) & ~(ws_popup | ws_chrome))
+    if not user32.SetParent(child_hwnd, parent_hwnd):
+        raise ctypes.WinError(ctypes.get_last_error())
+    swp_framechanged, swp_nozorder = 0x0020, 0x0004
+    user32.SetWindowPos(child_hwnd, None, 0, 0, 1, 1, swp_framechanged | swp_nozorder)
+    window.show()
+    # Qt can restore native frame bits while showing the window. Apply the
+    # child style again so the hosted editor fills the entire WPF panel.
+    style = user32.GetWindowLongPtrW(child_hwnd, gwl_style)
+    user32.SetWindowLongPtrW(child_hwnd, gwl_style, (style | ws_child) & ~(ws_popup | ws_chrome))
+    user32.SetWindowPos(child_hwnd, None, 0, 0, 1, 1, swp_framechanged | swp_nozorder)
+    return app.exec()
+
+
 def main() -> int:
+    if len(sys.argv) == 4 and sys.argv[1:3] == ["--embedded", "--parent-hwnd"]:
+        return run_embedded(int(sys.argv[3], 16))
     app = QApplication(sys.argv)
     app.setApplicationName("Spejl")
     app.setQuitOnLastWindowClosed(False)
