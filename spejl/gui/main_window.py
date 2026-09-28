@@ -130,6 +130,8 @@ class MainWindow(QMainWindow):
         self._verify_worker: VerifyWorker | None = None
         self._diff_overlay_path: Path | None = None
         self._selected_text_indexes: set[int] = set()
+        self._inspection_active = False
+        self._inspection_runs: dict[int, set[int]] = {}
         self._mirrored_zoom = 1.0
         self._preview_dpi = 150
         self._syncing_viewport = False
@@ -413,14 +415,12 @@ class MainWindow(QMainWindow):
         self._clear_button.setToolTip("Clear loaded plans and temporary work, returning Spejl to its fresh-open state")
         self._clear_button.clicked.connect(self._on_clear_clicked)
         page_layout.addWidget(self._clear_button)
-        self._resolve_button = QPushButton("Resolve")
-        self._resolve_button.setObjectName("verifyButton")
-        self._resolve_button.setToolTip(
-            "Move every currently flagged text run 3 points to the right, then refresh the overlap findings"
-        )
-        self._resolve_button.setEnabled(False)
-        self._resolve_button.clicked.connect(self._on_resolve_clicked)
-        page_layout.addWidget(self._resolve_button)
+        self._inspect_button = QPushButton("Inspect")
+        self._inspect_button.setObjectName("verifyButton")
+        self._inspect_button.setToolTip("Highlight flagged text on the mirrored plan without moving it")
+        self._inspect_button.setEnabled(False)
+        self._inspect_button.clicked.connect(self._on_inspect_clicked)
+        page_layout.addWidget(self._inspect_button)
         self._previous_page_button = QPushButton("‹ Previous")
         self._previous_page_button.setObjectName("verifyButton")
         self._previous_page_button.clicked.connect(lambda: self._change_preview_page(-1))
@@ -509,11 +509,11 @@ class MainWindow(QMainWindow):
             session.page_index < session.page_count - 1
             or (plan_index >= 0 and plan_index < plan_count - 1)
         )
-        self._update_resolve_button_state()
+        self._update_inspect_button_state()
 
-    def _update_resolve_button_state(self) -> None:
+    def _update_inspect_button_state(self) -> None:
         entry = self._batch_entries.get(self._input_path) if self._input_path else None
-        self._resolve_button.setEnabled(
+        self._inspect_button.setEnabled(
             not self._clear_pending
             and entry is not None
             and entry.output is not None
@@ -531,7 +531,7 @@ class MainWindow(QMainWindow):
         ):
             self._clear_pending = True
             self._clear_button.setEnabled(False)
-            self._resolve_button.setEnabled(False)
+            self._inspect_button.setEnabled(False)
             if self._job_running():
                 self._job_controller.request_cancel()
             self._status_label.setText("Clearing after the current operation finishes safely…")
@@ -561,6 +561,8 @@ class MainWindow(QMainWindow):
         self._output_route = None
         self._diff_overlay_path = None
         self._selected_text_indexes.clear()
+        self._inspection_active = False
+        self._inspection_runs.clear()
         self._document_session = DocumentSession()
         self._mirrored_zoom = 1.0
         self._preview_dpi = 150
@@ -611,7 +613,7 @@ class MainWindow(QMainWindow):
         self._verify_worker = None
         self._job_controller.worker = None
         self._job_controller._cancel_requested = False
-        self._update_resolve_button_state()
+        self._update_inspect_button_state()
 
     def _change_preview_page(self, offset: int) -> None:
         if self._input_path is None:
@@ -1063,6 +1065,8 @@ class MainWindow(QMainWindow):
         self._mirrored_zoom = 1.0
         self._preview_dpi = 150
         self._selected_text_indexes.clear()
+        self._inspection_active = False
+        self._inspection_runs.clear()
         # Keep both lists on the same plan whichever list initiated selection.
         # Block the selection callbacks while moving the counterpart row.
         self._selecting_batch_item = True
@@ -1366,56 +1370,31 @@ class MainWindow(QMainWindow):
         self._status_label.setText("")
         QMessageBox.critical(self, "Couldn't verify this plan", message)
 
-    def _on_resolve_clicked(self) -> None:
-        """Nudge every flagged text run three points right, across all pages."""
+    def _on_inspect_clicked(self) -> None:
+        """Highlight all flagged runs for review without changing the PDF."""
         if self._output_path is None or self._output_route is not Route.VECTOR:
             return
         entry = self._batch_entries.get(self._input_path) if self._input_path else None
         if entry is None:
             return
 
-        from spejl.vector.pdf_mirror import text_drawing_overlap_runs, translate_pdf_text_runs
+        from spejl.vector.pdf_mirror import text_drawing_overlap_runs
 
         try:
             overlaps = text_drawing_overlap_runs(self._output_path)
             entry.overlap_findings = [(page + 1, text) for page, _run, text in overlaps]
             entry.overlaps_checked = True
-            if not overlaps:
-                self._set_status_with_overlap("No flagged text needs resolving.")
-                return
-
-            translations = {
-                (page_index, run_index): (3.0, 0.0)
-                for page_index, run_index, _text in overlaps
-            }
-            edited = Path(self._temp_dir.name) / f"{self._output_path.stem}_resolved.pdf"
-            translate_pdf_text_runs(
-                self._output_path,
-                edited,
-                translations,
-                axis=self._output_axis or Axis.VERTICAL,
-            )
-            edited.replace(self._output_path)
-
-            page_index = self._document_session.page_index
-            self._mirrored_view.set_pixmap_source(load_preview(
-                self._output_path, dpi=self._preview_dpi, page_index=page_index
-            ))
-            selected = {
-                run_index
-                for page, run_index, _text in overlaps
-                if page == page_index
-            }
-            self._selected_text_indexes = selected
-            self._refresh_mirrored_text_regions(selected=selected)
-            self._sync_preview_scale()
-            count = len(overlaps)
+            self._inspection_active = True
+            self._inspection_runs.clear()
+            for page_index, run_index, _text in overlaps:
+                self._inspection_runs.setdefault(page_index, set()).add(run_index)
+            self._selected_text_indexes.clear()
+            self._refresh_mirrored_text_regions()
             self._set_status_with_overlap(
-                f"Moved {count} flagged text item(s) 3 pt to the right; checking remaining overlaps.",
-                refresh=True,
+                f"Inspecting {len(overlaps)} flagged text item(s). Navigate pages to see their highlights."
             )
         except Exception as exc:  # noqa: BLE001 - surfaced in the editor
-            QMessageBox.critical(self, "Couldn't resolve flagged text", str(exc))
+            QMessageBox.critical(self, "Couldn't inspect flagged text", str(exc))
 
     def _on_view_diff_clicked(self) -> None:
         if self._diff_overlay_path is None or not self._diff_overlay_path.exists():
@@ -1680,7 +1659,10 @@ class MainWindow(QMainWindow):
                 x0, y0, x1, y1 = trace["bbox"]
                 regions.append((index, QRectF(x0 * zoom, y0 * zoom, (x1 - x0) * zoom, (y1 - y0) * zoom)))
                 index += 1
-            self._mirrored_view.set_text_regions(regions, selected)
+            self._mirrored_view.set_text_regions(
+                regions, selected,
+                self._inspection_runs.get(page_index, set()) if self._inspection_active else None,
+            )
         finally:
             doc.close()
 
@@ -1689,13 +1671,23 @@ class MainWindow(QMainWindow):
         entry = self._batch_entries.get(self._input_path) if self._input_path else None
         if entry is None or entry.output is None:
             self._status_label.setText(message)
-            self._update_resolve_button_state()
+            self._update_inspect_button_state()
             return
         if refresh or not entry.overlaps_checked:
             try:
                 if entry.output.suffix.lower() == ".pdf":
-                    from spejl.vector.pdf_mirror import text_drawing_overlap_findings
-                    entry.overlap_findings = text_drawing_overlap_findings(entry.output)
+                    if self._inspection_active and refresh:
+                        from spejl.vector.pdf_mirror import text_drawing_overlap_runs
+
+                        overlaps = text_drawing_overlap_runs(entry.output)
+                        entry.overlap_findings = [(page + 1, text) for page, _run, text in overlaps]
+                        self._inspection_runs.clear()
+                        for page_index, run_index, _text in overlaps:
+                            self._inspection_runs.setdefault(page_index, set()).add(run_index)
+                        self._refresh_mirrored_text_regions(selected=self._selected_text_indexes)
+                    else:
+                        from spejl.vector.pdf_mirror import text_drawing_overlap_findings
+                        entry.overlap_findings = text_drawing_overlap_findings(entry.output)
                 else:
                     entry.overlap_findings = []
                 entry.overlaps_checked = True
@@ -1703,10 +1695,10 @@ class MainWindow(QMainWindow):
                 entry.overlap_findings = []
                 entry.overlaps_checked = False
                 self._status_label.setText(f"{message}\nOverlap check unavailable: {exc}")
-                self._update_resolve_button_state()
+                self._update_inspect_button_state()
                 return
         findings = entry.overlap_findings
-        self._update_resolve_button_state()
+        self._update_inspect_button_state()
         if not findings:
             self._status_label.setStyleSheet("color: #8CB3C0; font-size: 12px;")
             self._status_label.setToolTip("No text and drawing overlaps were detected.")

@@ -152,6 +152,7 @@ class ScaledImageLabel(QLabel):
         self._source: QPixmap | None = None
         self._text_regions: list[tuple[int, QRectF]] = []
         self._selected_text: set[int] = set()
+        self._flagged_text: set[int] = set()
         self._content_sized = False
         self._pan_start: QPointF | None = None
         self._pan_dragging = False
@@ -177,12 +178,14 @@ class ScaledImageLabel(QLabel):
         self._content_sized = enabled
 
     def set_text_regions(
-        self, regions: list[tuple[int, QRectF]], selected: set[int] | None = None
+        self, regions: list[tuple[int, QRectF]], selected: set[int] | None = None,
+        flagged: set[int] | None = None,
     ) -> None:
-        """Set selectable text boxes in source-pixmap coordinates."""
+        """Set text boxes and independent, non-editing inspection highlights."""
         self._text_regions = regions
         available = {index for index, _rect in regions}
         self._selected_text = set(selected or ()) & available
+        self._flagged_text = set(flagged or ()) & available
         self._alignment_guides = []
         self.update()
 
@@ -313,13 +316,18 @@ class ScaledImageLabel(QLabel):
 
     def paintEvent(self, event) -> None:  # noqa: N802
         super().paintEvent(event)
-        if not self._selected_text:
+        if not self._selected_text and not self._flagged_text:
             return
         transform = self._display_transform()
         if transform is None:
             return
         scale, ox, oy = transform
         painter = QPainter(self)
+        painter.setPen(QPen(QColor("#FF9800"), 2))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        for index, rect in self._text_regions:
+            if index in self._flagged_text:
+                painter.drawRect(QRectF(ox + rect.x() * scale, oy + rect.y() * scale, rect.width() * scale, rect.height() * scale))
         painter.setPen(QPen(QColor("#E53935"), 2))
         painter.setBrush(Qt.BrushStyle.NoBrush)
         for index, rect in self._text_regions:

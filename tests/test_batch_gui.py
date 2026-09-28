@@ -238,11 +238,14 @@ def test_resolved_overlap_disappears_live_after_text_nudge(qapp, tmp_path):
 
         window._set_status_with_overlap("Plan ready.", refresh=True)
         assert entry.overlap_findings == [(1, "Resolve me"), (1, "Keep me")]
+        window._inspect_button.click()
+        assert window._mirrored_view._flagged_text == {0, 1}
 
         # The first visible text run moves left, clear of its vertical wall.
         window._on_preview_text_nudged([0], right=100, down=0, snap_to_text=False)
 
         assert entry.overlap_findings == [(1, "Keep me")]
+        assert window._mirrored_view._flagged_text == {1}
         assert "1 text/drawing overlap" in window._status_label.text()
         assert "Resolve me" not in window._status_label.toolTip()
         assert "Keep me" in window._status_label.toolTip()
@@ -250,7 +253,7 @@ def test_resolved_overlap_disappears_live_after_text_nudge(qapp, tmp_path):
         window.close()
 
 
-def test_resolve_button_moves_every_flagged_run_three_points_right(qapp, tmp_path):
+def test_inspect_button_highlights_every_flagged_run_without_editing_pdf(qapp, tmp_path):
     import pymupdf
 
     from spejl.gui.main_window import MainWindow
@@ -270,7 +273,7 @@ def test_resolve_button_moves_every_flagged_run_three_points_right(qapp, tmp_pat
     try:
         window._on_file_chosen(source)
         entry = window._batch_entries[source.resolve()]
-        output = Path(window._temp_dir.name) / "resolved-test.pdf"
+        output = Path(window._temp_dir.name) / "inspect-test.pdf"
         output.write_bytes(source.read_bytes())
         entry.output = output
         entry.document = Document(source, output, Axis.HORIZONTAL, Route.VECTOR)
@@ -280,34 +283,31 @@ def test_resolve_button_moves_every_flagged_run_three_points_right(qapp, tmp_pat
 
         before = text_drawing_overlap_runs(output)
         assert [text for _page, _run, text in before] == ["First flagged", "Second flagged"]
-        assert window._resolve_button.isEnabled()
-        window._resolve_button.click()
+        original_bytes = output.read_bytes()
+        assert window._inspect_button.text() == "Inspect"
+        assert window._inspect_button.isEnabled()
+        window._inspect_button.click()
 
         after = text_drawing_overlap_runs(output)
-        assert after == []
-        moved = pymupdf.open(output)
-        try:
-            for page_index, run_index, _text in before:
-                old_doc = pymupdf.open(source)
-                try:
-                    old_runs = [
-                        trace for trace in old_doc[page_index].get_texttrace()
-                        if trace.get("type") == 0 and trace.get("chars")
-                    ]
-                    old_x = old_runs[run_index]["chars"][0][2][0]
-                finally:
-                    old_doc.close()
-                new_runs = [
-                    trace for trace in moved[page_index].get_texttrace()
-                    if trace.get("type") == 0 and trace.get("chars")
-                ]
-                new_x = new_runs[run_index]["chars"][0][2][0]
-                assert new_x == pytest.approx(old_x + 3.0, abs=0.05)
-        finally:
-            moved.close()
-        assert "Moved 2 flagged text item(s) 3 pt to the right" in window._status_label.text()
-        assert entry.overlap_findings == []
-        assert not window._resolve_button.isEnabled()
+        assert after == before
+        assert output.read_bytes() == original_bytes
+        assert window._mirrored_view._flagged_text == {before[0][1]}
+        assert window._mirrored_view._selected_text == set()
+        assert "Inspecting 2 flagged text item(s)" in window._status_label.text()
+        assert entry.overlap_findings == [(1, "First flagged"), (2, "Second flagged")]
+
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        QTest.keyClick(window._mirrored_view, Qt.Key.Key_Right)
+        assert output.read_bytes() == original_bytes
+
+        window._next_page_button.click()
+        assert window._mirrored_view._flagged_text == {before[1][1]}
+        assert window._mirrored_view._selected_text == set()
+        assert output.read_bytes() == original_bytes
+        window._previous_page_button.click()
+        assert window._mirrored_view._flagged_text == {before[0][1]}
+        assert window._inspect_button.isEnabled()
     finally:
         window.close()
 
@@ -352,7 +352,7 @@ def test_clear_button_resets_session_and_removes_generated_work(qapp, tmp_path):
         assert window._page_label.text() == "Single page"
         assert not window._mirror_button.isEnabled()
         assert not window._save_button.isEnabled()
-        assert not window._resolve_button.isEnabled()
+        assert not window._inspect_button.isEnabled()
         assert "Drop plans here" in window._drop_zone._title.text()
     finally:
         window.close()
