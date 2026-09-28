@@ -3,7 +3,7 @@ SPEJL - FULL OFFLINE WINDOWS INSTALLER
 Mirror floor-plan geometry while keeping text readable.
 
 INSTALL ON ANOTHER PC
-1. Copy Spejl-0.1.17-Windows-x64-Setup.exe to the other computer.
+1. Copy Spejl-0.1.18-Windows-x64-Setup.exe to the other computer.
 2. Double-click the installer and follow the setup wizard.
 3. Open Spejl from the Start menu or desktop shortcut.
 
@@ -23,6 +23,7 @@ rights. The default folder is %LOCALAPPDATA%\Programs\Spejl.
 USE
 Open an image-free vector PDF floor plan, select the mirror direction, and run
 Mirror. Review the resulting drawing and any text/QA flags before exporting.
+Use Inspect to highlight text/drawing overlaps without moving text in the PDF.
 Embedded PDF text stays editable. Scanned or mixed image/vector PDFs are
 rejected because their text would lose editability; outlined lettering is
 drawing geometry rather than editable text.
