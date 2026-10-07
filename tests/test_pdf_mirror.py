@@ -147,18 +147,56 @@ def test_vertical_dimension_still_reads_bottom_to_top(source_pdf: Path, tmp_path
     assert cx < PAGE_W - DIM_X + 5
 
 
-def test_rotated_text_uses_the_mirrored_baseline_origin(source_pdf: Path, tmp_path: Path):
+def test_rotated_text_glyph_box_lands_on_its_mirrored_footprint(source_pdf: Path, tmp_path: Path):
     """Vertical text must keep its exact wall offset after reflection.
 
-    An axis-aligned bbox centre includes font ascender/descender padding and
-    shifts the baseline sideways; the PDF origin does not.
+    Keeping a bottom-to-top run readable flips its glyphs to the other side
+    of the baseline, so mirroring only the baseline origin pushes a
+    dimension by ``size * (ascender + descender)`` into the wall it sat
+    beside. The glyph box itself must land on its reflected footprint.
     """
     out = tmp_path / "plan_mirrored_origin.pdf"
     mirror_pdf(source_pdf, out, axis=Axis.VERTICAL)
     source_dim = next(s for s in _spans(source_pdf) if s["text"] == "5155")
     mirrored_dim = next(s for s in _spans(out) if s["text"] == "5155")
-    assert mirrored_dim["origin"][0] == pytest.approx(PAGE_W - source_dim["origin"][0], abs=0.1)
-    assert mirrored_dim["origin"][1] == pytest.approx(source_dim["origin"][1], abs=0.1)
+    x0, y0, x1, y1 = source_dim["bbox"]
+    assert mirrored_dim["bbox"] == pytest.approx((PAGE_W - x1, y0, PAGE_W - x0, y1), abs=0.1)
+
+
+@pytest.mark.parametrize("axis", list(Axis))
+@pytest.mark.parametrize("rotate", [90, 270])
+def test_condensed_and_slanted_text_boxes_land_on_their_mirrored_footprint(
+    tmp_path: Path, axis: Axis, rotate: int
+):
+    """CAD exports condense text through a non-uniform ``Tm`` (e.g. ``H*``
+    at 10pt along the baseline, 8pt across it) and slant dimensions; the
+    box correction must follow the run's own up vector and height scale."""
+    source = tmp_path / "rotated.pdf"
+    out = tmp_path / "rotated-mirrored.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=PAGE_W, height=PAGE_H)
+    page.insert_text((150, 200), "5155", fontsize=12, fontname="helv", rotate=rotate)
+    page.insert_text(
+        (250, 200), "H*", fontsize=10, fontname="helv",
+        morph=(pymupdf.Point(250, 200), pymupdf.Matrix(1, 0.8)),
+    )
+    writer = pymupdf.TextWriter(page.rect)
+    writer.append((80, 120), "2080", fontsize=11)
+    writer.write_text(page, morph=(pymupdf.Point(80, 120), pymupdf.Matrix(-30)))
+    doc.save(source)
+    doc.close()
+
+    mirror_pdf(source, out, axis=axis)
+    source_spans = {s["text"]: s for s in _spans(source)}
+    mirrored_spans = {s["text"]: s for s in _spans(out)}
+    assert set(mirrored_spans) == {"5155", "H*", "2080"}
+    for text, span in source_spans.items():
+        x0, y0, x1, y1 = span["bbox"]
+        if axis in (Axis.VERTICAL, Axis.BOTH):
+            x0, x1 = PAGE_W - x1, PAGE_W - x0
+        if axis in (Axis.HORIZONTAL, Axis.BOTH):
+            y0, y1 = PAGE_H - y1, PAGE_H - y0
+        assert mirrored_spans[text]["bbox"] == pytest.approx((x0, y0, x1, y1), abs=0.1), text
 
 
 def test_horizontal_axis_mirror_keeps_the_same_reading_convention(source_pdf, tmp_path):
