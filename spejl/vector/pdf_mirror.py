@@ -15,12 +15,16 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 import pymupdf
 import pikepdf
 
 from spejl.models import Axis, Document, Flag, PageResult, Route
 from spejl.transform import mirror as M
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # Point/direction mirroring and the readability convention live in
 # transform/mirror.py, shared with Route B — two copies of that rule
@@ -40,8 +44,20 @@ _TIMES = {False: {False: "tiro", True: "tiit"}, True: {False: "tibo", True: "tib
 _COURIER = {False: {False: "cour", True: "coit"}, True: {False: "cobo", True: "cobi"}}
 
 
-def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) -> Document:
+def mirror_pdf(
+    input_path: Path,
+    output_path: Path,
+    axis: Axis = Axis.VERTICAL,
+    *,
+    pictures_as_linework: bool = False,
+) -> Document:
     """Mirror every page of ``input_path`` and write ``output_path``.
+
+    ``pictures_as_linework`` keeps image-bearing pages on the vector route:
+    their pictures are reflected with the page like any other drawing.
+    Only pass it once every piece of lettering inside those pictures has
+    been taken out (see :mod:`spejl.vector.mixed_pdf`), or that lettering
+    comes out backwards.
 
     Returns the :class:`Document` record — the same object that
     ``to_sidecar()`` turns into the ``*.spejl.json`` written beside the
@@ -65,7 +81,7 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
             # Raster and mixed pages cannot be reconstructed from paths and
             # spans: that drops images (including inline images). Render the
             # complete page and use the text-aware raster route instead.
-            if page.get_image_info():
+            if page.get_image_info() and not pictures_as_linework:
                 from spejl.raster.pipeline import mirror_raster
                 with TemporaryDirectory(prefix="spejl-pdf-") as temporary:
                     source_png = Path(temporary) / "source.png"
@@ -109,6 +125,7 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
 
             fitted_stream, did_fit = _fit_page_content_stream(
                 new_page, transformed, width=W, height=H,
+                include_images=not pictures_as_linework,
             )
             if did_fit:
                 out.update_stream(xref, fitted_stream)
@@ -145,7 +162,9 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
                 if not _pixmap_has_ink(pix):
                     blank_pages.append(page_index)
                 if page_index in fitted_pages:
-                    bounds = _page_visible_content_bounds(written_page)
+                    bounds = _page_visible_content_bounds(
+                        written_page, include_images=not pictures_as_linework
+                    )
                     margin = _MIN_PAGE_CONTENT_MARGIN_PT
                     tolerance = 0.1
                     if bounds is not None and (
@@ -173,11 +192,20 @@ def mirror_pdf(input_path: Path, output_path: Path, axis: Axis = Axis.VERTICAL) 
     return result
 
 
-def _page_visible_content_bounds(page: pymupdf.Page) -> pymupdf.Rect | None:
-    """Union visible PDF object bounds, including strokes and text glyphs."""
+def _page_visible_content_bounds(
+    page: pymupdf.Page, *, include_images: bool = True
+) -> pymupdf.Rect | None:
+    """Union visible PDF object bounds, including strokes and text glyphs.
+
+    A raster export's picture usually spans the whole sheet, paper margins
+    included; ``include_images=False`` measures only the vector content so
+    such a page is not shrunk to fit its own white border.
+    """
     bounds: pymupdf.Rect | None = None
     for kind, bbox in page.get_bboxlog():
         if kind.startswith("clip-") or kind == "group":
+            continue
+        if not include_images and kind.startswith("fill-im"):
             continue
         rect = pymupdf.Rect(bbox)
         if rect.is_empty or not rect.is_valid:
@@ -196,26 +224,30 @@ def _fit_page_content_stream(
     width: float,
     height: float,
     margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
+    include_images: bool = True,
 ) -> tuple[bytes, bool]:
-    """Translate/scale page graphics just enough to keep them 5pt in-bounds.
+    """Bring page graphics back on the sheet, only if any would be cut off.
 
-    A uniform fit keeps walls, door swings, dimensions, and text aligned. The
-    existing page size is retained; content is only changed when its rendered
-    bounds cross the safety inset. Rotated PDF pages use a different default
+    Plans are scaled drawings, so the mirror stays exactly 1:1 whenever all
+    content is on the page — even content within ``margin`` of the edge:
+    reflection keeps every edge distance, so the mirror is no closer to the
+    edge than the source already was. Only content crossing the page edge
+    triggers a uniform fit to ``margin``, which keeps walls, door swings,
+    dimensions and text aligned. Rotated PDF pages use a different default
     user-space basis, so they are left untouched rather than risk a bad CTM.
     """
     if page.rotation or width <= 2 * margin or height <= 2 * margin:
         return content, False
-    bounds = _page_visible_content_bounds(page)
+    bounds = _page_visible_content_bounds(page, include_images=include_images)
     if bounds is None:
         return content, False
     safe = pymupdf.Rect(margin, margin, width - margin, height - margin)
     tolerance = 0.05
     if (
-        bounds.x0 >= safe.x0 - tolerance
-        and bounds.y0 >= safe.y0 - tolerance
-        and bounds.x1 <= safe.x1 + tolerance
-        and bounds.y1 <= safe.y1 + tolerance
+        bounds.x0 >= -tolerance
+        and bounds.y0 >= -tolerance
+        and bounds.x1 <= width + tolerance
+        and bounds.y1 <= height + tolerance
     ):
         return content, False
 
@@ -377,10 +409,10 @@ def selected_text_overlaps_drawing(
             if not selected_boxes:
                 continue
             occupied = _drawing_element_rectangles(page)
-            for block in page.get_text("rawdict").get("blocks", []):
-                if block.get("type") == 1 and "bbox" in block:
-                    occupied.append(pymupdf.Rect(block["bbox"]))
+            pictures = _picture_ink(page)
             if any(text_box.intersects(element) for text_box in selected_boxes for element in occupied):
+                return True
+            if any(_box_on_picture_ink(text_box, pictures) for text_box in selected_boxes):
                 return True
         return False
     finally:
@@ -410,14 +442,13 @@ def text_drawing_overlap_runs(pdf_path: Path) -> list[tuple[int, int, str]]:
     try:
         for page_index, page in enumerate(document):
             occupied = _drawing_element_rectangles(page)
-            for block in page.get_text("rawdict").get("blocks", []):
-                if block.get("type") == 1 and "bbox" in block:
-                    occupied.append(pymupdf.Rect(block["bbox"]))
-            if not occupied:
+            pictures = _picture_ink(page)
+            if not occupied and not pictures:
                 continue
             for run_index, trace in enumerate(_trace_runs(page)):
                 box = pymupdf.Rect(trace["bbox"])
-                if not any(box.intersects(element) for element in occupied):
+                if not any(box.intersects(element) for element in occupied) \
+                        and not _box_on_picture_ink(box, pictures):
                     continue
                 label = "".join(chr(char[0]) for char in trace["chars"]).strip()
                 if label:
@@ -425,6 +456,60 @@ def text_drawing_overlap_runs(pdf_path: Path) -> list[tuple[int, int, str]]:
         return findings
     finally:
         document.close()
+
+
+def _picture_ink(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, pymupdf.Matrix, np.ndarray]]:
+    """Each picture on the page with a dark-pixel mask of its drawing.
+
+    A raster export's picture spans the whole sheet; treating its rectangle
+    as occupied would flag every label on the page. Only where the picture
+    actually has linework does text overlap the drawing. The placement
+    matrix is kept because a mirrored page draws the same pixels flipped.
+    """
+    import numpy as np
+
+    pictures: list[tuple[pymupdf.Rect, pymupdf.Matrix, np.ndarray]] = []
+    for block in page.get_text("rawdict").get("blocks", []):
+        if block.get("type") != 1 or "bbox" not in block:
+            continue
+        rect = pymupdf.Rect(block["bbox"])
+        transform = pymupdf.Matrix(block.get("transform") or (rect.width, 0, 0, rect.height, rect.x0, rect.y0))
+        try:
+            pix = pymupdf.Pixmap(block["image"])
+            if pix.alpha:
+                pix = pymupdf.Pixmap(pix, 0)
+            if pix.colorspace is None or pix.colorspace.n != 1:
+                pix = pymupdf.Pixmap(pymupdf.csGRAY, pix)
+            gray = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.h, pix.w)
+            ink = gray < 128
+        except Exception:  # noqa: BLE001 — an undecodable picture counts as fully occupied
+            ink = np.ones((1, 1), dtype=bool)
+        pictures.append((rect, transform, ink))
+    return pictures
+
+
+def _box_on_picture_ink(
+    box: pymupdf.Rect, pictures: list[tuple[pymupdf.Rect, pymupdf.Matrix, np.ndarray]]
+) -> bool:
+    """Whether ``box`` covers any dark pixel of any picture under it."""
+    for rect, transform, ink in pictures:
+        hit = box & rect
+        if hit.is_empty:
+            continue
+        inverse = ~transform
+        if inverse == pymupdf.Matrix(0, 0, 0, 0, 0, 0):
+            continue
+        h, w = ink.shape
+        # Page point -> unit square of the picture -> pixel; image row 0 is at v = 0.
+        corners = [pymupdf.Point(x, y) * inverse for x in (hit.x0, hit.x1) for y in (hit.y0, hit.y1)]
+        us, vs = [c.x for c in corners], [c.y for c in corners]
+        x0 = max(int(min(us) * w), 0)
+        y0 = max(int(min(vs) * h), 0)
+        x1 = min(max(math.ceil(max(us) * w), x0 + 1), w)
+        y1 = min(max(math.ceil(max(vs) * h), y0 + 1), h)
+        if x0 < w and y0 < h and ink[y0:y1, x0:x1].any():
+            return True
+    return False
 
 
 def _drawing_element_rectangles(page: pymupdf.Page) -> list[pymupdf.Rect]:

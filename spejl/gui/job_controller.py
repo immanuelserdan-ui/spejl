@@ -41,12 +41,13 @@ class MirrorJobController(QObject):
     def cancel_requested(self) -> bool:
         return self._cancel_requested
 
-    def start(self, input_path: Path, output_path: Path, axis: Axis) -> MirrorWorker:
+    def start(self, input_path: Path, output_path: Path, axis: Axis,
+              picture_labels: list | None = None) -> MirrorWorker:
         if self.is_running:
             raise RuntimeError("A mirror job is already running.")
         self._cancel_requested = False
         self.stage_changed.emit("Preparing plan…")
-        self.worker = MirrorWorker(input_path, output_path, axis)
+        self.worker = MirrorWorker(input_path, output_path, axis, picture_labels)
         self.worker.started.connect(self._on_worker_started)
         self.worker.succeeded.connect(self._on_worker_succeeded)
         self.worker.failed.connect(self._on_worker_failed)

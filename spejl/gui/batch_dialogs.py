@@ -25,7 +25,7 @@ class MirrorSelectionDialog(QDialog):
         self.list = QListWidget()
         for entry in entries:
             name = entry.display_name or entry.source.name
-            problem = entry.input_problem
+            problem = entry.blocking_problem
             # A plan that is known to fail starts unchecked, so a mixed batch
             # mirrors its good plans without a run of predictable failures.
             item = QListWidgetItem(f"⚠  {name} — {problem.badge}" if problem else name)

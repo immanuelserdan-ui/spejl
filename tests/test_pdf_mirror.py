@@ -445,10 +445,10 @@ def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
     font = pdf.make_indirect(pikepdf.Dictionary(
         Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Helvetica,
     ))
-    # The wall spans nearly the whole sheet, so the fit has to scale it
+    # The wall runs off the sheet's left edge, so the fit has to scale it
     # down as well as translate it -- the case a wrong origin breaks.
     content = (
-        b"0 0 0 RG 2 w\n-99 -99 m -99 99 l 99 99 l 99 -99 l h S\n"
+        b"0 0 0 RG 2 w\n-102 -99 m -102 99 l 99 99 l 99 -99 l h S\n"
         b"BT /F1 12 Tf 1 0 0 1 -40 0 Tm (Stue) Tj ET\n"
     )
     pdf.add_blank_page(page_size=(200, 200))
@@ -475,3 +475,29 @@ def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
         assert bounds.y0 >= 5.0 - 0.1
         assert bounds.x1 <= page.rect.width - 5.0 + 0.1
         assert bounds.y1 <= page.rect.height - 5.0 + 0.1
+
+
+def test_content_near_the_edge_stays_exactly_one_to_one(tmp_path: Path):
+    """A plan whose content sits inside the 5 pt margin but on the sheet is a
+    scaled drawing: the mirror must not shrink or shift it (it would drift
+    out of alignment with the source, ~2% on a real T08 plan)."""
+    source = tmp_path / "near-edge.pdf"
+    output = tmp_path / "near-edge-mirrored.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=200, height=200)
+    shape = page.new_shape()
+    shape.draw_rect(pymupdf.Rect(2.5, 2.5, 150, 197))  # 1.5 pt from the edges, on the sheet
+    shape.finish(color=(0, 0, 0), width=2)
+    shape.commit()
+    page.insert_text((60, 100), "Entry", fontsize=12)
+    doc.save(source)
+    doc.close()
+
+    mirror_pdf(source, output, axis=Axis.VERTICAL)
+    with pymupdf.open(source) as src, pymupdf.open(output) as out:
+        want = [pymupdf.Rect(200 - d["rect"].x1, d["rect"].y0, 200 - d["rect"].x0, d["rect"].y1)
+                for d in src[0].get_drawings()]
+        got = [d["rect"] for d in out[0].get_drawings()]
+        assert len(got) == len(want)
+        for w, g in zip(want, got):
+            assert tuple(g) == pytest.approx(tuple(w), abs=1e-3)
