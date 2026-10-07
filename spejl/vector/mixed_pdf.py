@@ -21,11 +21,11 @@ This module takes the third way, with a person in the loop:
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import math
+import zlib
+from dataclasses import dataclass, field
 from pathlib import Path
 from tempfile import TemporaryDirectory
-import zlib
 
 import numpy as np
 import pikepdf
@@ -118,12 +118,12 @@ def _ink_box(gray: np.ndarray, box: tuple[float, float, float, float], pad: int 
     from scipy import ndimage
 
     h, w = gray.shape
-    x0, y0, x1, y1 = (int(math.floor(box[0])) - pad, int(math.floor(box[1])) - pad,
-                      int(math.ceil(box[2])) + pad, int(math.ceil(box[3])) + pad)
+    x0, y0, x1, y1 = (math.floor(box[0]) - pad, math.floor(box[1]) - pad,
+                      math.ceil(box[2]) + pad, math.ceil(box[3]) + pad)
     x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
     margin = 12
     rx0, ry0, rx1, ry1 = max(x0 - margin, 0), max(y0 - margin, 0), min(x1 + margin, w), min(y1 + margin, h)
-    labels, count = ndimage.label(gray[ry0:ry1, rx0:rx1] < 128)
+    labels, _count = ndimage.label(gray[ry0:ry1, rx0:rx1] < 128)
     keep = np.zeros_like(labels, dtype=bool)
     for index, sl in enumerate(ndimage.find_objects(labels), start=1):
         if sl is None:
@@ -134,7 +134,7 @@ def _ink_box(gray: np.ndarray, box: tuple[float, float, float, float], pad: int 
             keep |= labels == index
     ys, xs = np.where(keep)
     if len(xs) == 0:
-        return (max(int(box[0]), 0), max(int(box[1]), 0), min(int(math.ceil(box[2])), w), min(int(math.ceil(box[3])), h))
+        return (max(int(box[0]), 0), max(int(box[1]), 0), min(math.ceil(box[2]), w), min(math.ceil(box[3]), h))
     return (int(xs.min()) + rx0, int(ys.min()) + ry0, int(xs.max()) + rx0 + 1, int(ys.max()) + ry0 + 1)
 
 

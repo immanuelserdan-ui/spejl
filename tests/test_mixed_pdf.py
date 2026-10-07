@@ -72,7 +72,7 @@ def _fake_detections(label_ink: pymupdf.Rect):
 @pytest.fixture
 def mixed(tmp_path, monkeypatch):
     path, label_ink = _make_mixed_pdf(tmp_path / "mixed.pdf")
-    import spejl.detect.rotations as rotations
+    from spejl.detect import rotations
 
     monkeypatch.setattr(rotations, "detect_all_orientations", _fake_detections(label_ink))
     return path, label_ink

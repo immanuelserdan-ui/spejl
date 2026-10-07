@@ -15,12 +15,16 @@ from dataclasses import dataclass
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from typing import TYPE_CHECKING
 
 import pymupdf
 import pikepdf
 
 from spejl.models import Axis, Document, Flag, PageResult, Route
 from spejl.transform import mirror as M
+
+if TYPE_CHECKING:
+    import numpy as np
 
 # Point/direction mirroring and the readability convention live in
 # transform/mirror.py, shared with Route B — two copies of that rule
@@ -451,7 +455,7 @@ def text_drawing_overlap_runs(pdf_path: Path) -> list[tuple[int, int, str]]:
         document.close()
 
 
-def _picture_ink(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, pymupdf.Matrix, "np.ndarray"]]:
+def _picture_ink(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, pymupdf.Matrix, np.ndarray]]:
     """Each picture on the page with a dark-pixel mask of its drawing.
 
     A raster export's picture spans the whole sheet; treating its rectangle
@@ -482,7 +486,7 @@ def _picture_ink(page: pymupdf.Page) -> list[tuple[pymupdf.Rect, pymupdf.Matrix,
 
 
 def _box_on_picture_ink(
-    box: pymupdf.Rect, pictures: list[tuple[pymupdf.Rect, pymupdf.Matrix, "np.ndarray"]]
+    box: pymupdf.Rect, pictures: list[tuple[pymupdf.Rect, pymupdf.Matrix, np.ndarray]]
 ) -> bool:
     """Whether ``box`` covers any dark pixel of any picture under it."""
     for rect, transform, ink in pictures:
