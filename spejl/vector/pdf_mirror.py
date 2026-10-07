@@ -226,11 +226,14 @@ def _fit_page_content_stream(
     margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
     include_images: bool = True,
 ) -> tuple[bytes, bool]:
-    """Translate/scale page graphics just enough to keep them 5pt in-bounds.
+    """Bring page graphics back on the sheet, only if any would be cut off.
 
-    A uniform fit keeps walls, door swings, dimensions, and text aligned. The
-    existing page size is retained; content is only changed when its rendered
-    bounds cross the safety inset. Rotated PDF pages use a different default
+    Plans are scaled drawings, so the mirror stays exactly 1:1 whenever all
+    content is on the page — even content within ``margin`` of the edge:
+    reflection keeps every edge distance, so the mirror is no closer to the
+    edge than the source already was. Only content crossing the page edge
+    triggers a uniform fit to ``margin``, which keeps walls, door swings,
+    dimensions and text aligned. Rotated PDF pages use a different default
     user-space basis, so they are left untouched rather than risk a bad CTM.
     """
     if page.rotation or width <= 2 * margin or height <= 2 * margin:
@@ -241,10 +244,10 @@ def _fit_page_content_stream(
     safe = pymupdf.Rect(margin, margin, width - margin, height - margin)
     tolerance = 0.05
     if (
-        bounds.x0 >= safe.x0 - tolerance
-        and bounds.y0 >= safe.y0 - tolerance
-        and bounds.x1 <= safe.x1 + tolerance
-        and bounds.y1 <= safe.y1 + tolerance
+        bounds.x0 >= -tolerance
+        and bounds.y0 >= -tolerance
+        and bounds.x1 <= width + tolerance
+        and bounds.y1 <= height + tolerance
     ):
         return content, False
 
