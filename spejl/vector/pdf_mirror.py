@@ -226,10 +226,17 @@ def _fit_page_content_stream(
     )
     dx = safe.x0 + (safe.width - bounds.width * scale) / 2 - bounds.x0 * scale
     dy = safe.y0 + (safe.height - bounds.height * scale) / 2 - bounds.y0 * scale
-    # PDF's default user space has its origin at the bottom-left, while the
-    # bounds above use PyMuPDF's top-left page coordinates.
-    pdf_dy = height * (1 - scale) - dy
-    matrix = f"q\n{scale:.10f} 0 0 {scale:.10f} {dx:.10f} {pdf_dy:.10f} cm\n".encode("ascii")
+    # The fit above is in PyMuPDF's top-left page coordinates, but ``cm``
+    # acts in PDF user space, whose origin is wherever the MediaBox puts it
+    # (Revit/Adobe exports often centre it on the sheet). Conjugate the fit
+    # by the page's user-space-to-page matrix so it lands where it was
+    # measured for any MediaBox origin.
+    to_page = page.transformation_matrix
+    fit = pymupdf.Matrix(scale, 0, 0, scale, dx, dy)
+    cm = to_page * fit * ~to_page
+    matrix = (
+        f"q\n{cm.a:.10f} {cm.b:.10f} {cm.c:.10f} {cm.d:.10f} {cm.e:.10f} {cm.f:.10f} cm\n"
+    ).encode("ascii")
     return matrix + content + b"\nQ\n", True
 
 
@@ -575,15 +582,27 @@ def _trace_runs(page: pymupdf.Page) -> list[dict]:
 
 
 def _trace_end(run: dict) -> tuple[float, float]:
-    """Farthest baseline endpoint of one traced glyph run, screen space."""
+    """Farthest baseline endpoint of one traced glyph run, screen space.
+
+    A traced glyph bbox is the axis-aligned hull of an ``advance x size``
+    box laid along ``dir``.  Projecting that hull's corners onto a slanted
+    baseline overshoots the advance, so solve the hull for the advance
+    instead (exact for cardinal runs too, where it reduces to the width).
+    """
     start = run["chars"][0][2]
     dx, dy = run["dir"]
+    last_origin = run["chars"][-1][2]
     last_bbox = run["chars"][-1][3]
-    corners = (
-        (last_bbox[0], last_bbox[1]), (last_bbox[0], last_bbox[3]),
-        (last_bbox[2], last_bbox[1]), (last_bbox[2], last_bbox[3]),
+    cos, sin = abs(dx), abs(dy)
+    size = float(run["size"])
+    if cos >= sin:
+        glyph_advance = ((last_bbox[2] - last_bbox[0]) - size * sin) / cos
+    else:
+        glyph_advance = ((last_bbox[3] - last_bbox[1]) - size * cos) / sin
+    extent = (
+        (last_origin[0] - start[0]) * dx + (last_origin[1] - start[1]) * dy
+        + max(glyph_advance, 0.0)
     )
-    extent = max((x - start[0]) * dx + (y - start[1]) * dy for x, y in corners)
     return (start[0] + dx * extent, start[1] + dy * extent)
 
 
@@ -591,23 +610,37 @@ def _run_text(run: dict) -> str:
     return "".join(chr(char[0]) for char in run["chars"])
 
 
+def _glyph_box_flip_shift(run: dict) -> float:
+    """Glyph-box span that a local y flip moves a run by, in trace size units.
+
+    Glyphs occupy ``size * [descender, ascender]`` across the baseline.  A
+    local y flip mirrors that span through the baseline, so the box moves by
+    ``size * (ascender + descender)``; shifting the baseline back by the same
+    amount puts the box on the reflection of its source footprint.  The
+    trace ``size`` is measured along the baseline, so callers rescale by the
+    text matrix for condensed (non-uniform) fonts.
+    """
+    return float(run["size"]) * (float(run["ascender"]) + float(run["descender"]))
+
+
 def _mul_text_matrix_by_reflection(
-    matrix: list[float], advance: float, reverse_baseline: bool
+    matrix: list[float], advance: float, reverse_baseline: bool, y_shift: float = 0.0
 ) -> list[float]:
     """Apply a readable local reflection to one PDF ``Tm``.
 
     The page is globally reflected.  A second, local reflection makes the
     combined glyph transform orientation-preserving.  Flipping the local y
-    axis keeps an already-readable reflected baseline; flipping local x and
-    translating by the exact traced advance reverses a backwards baseline
-    while retaining the original string and its raw ``TJ`` spacing.
+    axis (about ``y_shift / 2`` in text space) keeps an already-readable
+    reflected baseline; flipping local x and translating by the exact traced
+    advance reverses a backwards baseline while retaining the original
+    string and its raw ``TJ`` spacing.
     """
     a, b, c, d, e, f = matrix
     if reverse_baseline:
         # M * [-1 0 0 1 advance 0]
         return [-a, -b, c, d, e + a * advance, f + b * advance]
-    # M * [1 0 0 -1 0 0]
-    return [a, b, -c, -d, e, f]
+    # M * [1 0 0 -1 0 y_shift]
+    return [a, b, -c, -d, e + c * y_shift, f + d * y_shift]
 
 
 def _transform_vector_content(
@@ -631,10 +664,20 @@ def _transform_vector_content(
     rewritten: list[pikepdf.ContentStreamInstruction] = []
     in_text = False
     state: _TextState | None = None
+    # Current transformation matrix, so text scale is measured through
+    # ``Tm x CTM`` -- CAD writers often scale or condense text with ``cm``.
+    ctm: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
+    ctm_stack: list[tuple[float, ...]] = []
 
     for instruction in instructions:
         operands, operator = instruction
         name = str(operator)
+        if name == "q":
+            ctm_stack.append(ctm)
+        elif name == "Q" and ctm_stack:
+            ctm = ctm_stack.pop()
+        elif name == "cm" and len(operands) == 6:
+            ctm = _matrix_multiply(ctm, tuple(float(value) for value in operands))
         if name == "BT":
             if in_text:
                 raise VectorTextTransformError("Nested BT in PDF content stream.")
@@ -668,24 +711,40 @@ def _transform_vector_content(
         out_dx, out_dy = M.mirror_direction(dx, dy, axis)
         reverse = raw_dx * out_dx + raw_dy * out_dy < 0
 
-        # ``Tm``'s first column maps text-space x to page space.  The traced
-        # physical advance projected on that vector gives the local
+        # ``Tm x CTM`` maps text-space x/y to page space.  The traced
+        # physical advance projected on the x column gives the local
         # translation required by the text-space reflection.
-        a, b = float(operands[0]), float(operands[1])
-        unit = math.hypot(a, b)
+        matrix = [float(value) for value in operands]
+        to_page = _matrix_multiply(ctm, tuple(matrix))
+        unit = math.hypot(to_page[0], to_page[1])
         if unit < 1e-9:
             raise VectorTextTransformError("Degenerate PDF text matrix.")
         advance = math.hypot(end[0] - start[0], end[1] - start[1]) / unit
-        matrix = [float(value) for value in operands]
-        replacement = _mul_text_matrix_by_reflection(matrix, advance, reverse)
-        rewritten.append(pikepdf.ContentStreamInstruction(replacement, operator))
-
         raw_start = _mirror_point(*start, width, height, axis)
         raw_end = _mirror_point(*end, width, height, axis)
+        if reverse:
+            replacement = _mul_text_matrix_by_reflection(matrix, advance, True)
+            want_start, want_end = raw_end, raw_start
+        else:
+            # Flipping local y keeps the baseline but turns the glyphs to
+            # the other side of it (a vertical dimension under a vertical
+            # mirror lands in the wall it used to sit beside). Shift the
+            # baseline by the glyph box's span so the box itself, not just
+            # its baseline, lands on its mirrored footprint.
+            text_shift = _glyph_box_flip_shift(run) / unit
+            shift = text_shift * math.hypot(to_page[2], to_page[3])
+            up_x, up_y = _mirrored_screen_direction(dy, -dx, axis)
+            want_start = (raw_start[0] + up_x * shift, raw_start[1] + up_y * shift)
+            want_end = (raw_end[0] + up_x * shift, raw_end[1] + up_y * shift)
+            replacement = _mul_text_matrix_by_reflection(
+                matrix, advance, False, y_shift=text_shift,
+            )
+        rewritten.append(pikepdf.ContentStreamInstruction(replacement, operator))
+
         expected.append(_TextExpectation(
             text=_run_text(run),
-            start=raw_end if reverse else raw_start,
-            end=raw_start if reverse else raw_end,
+            start=want_start,
+            end=want_end,
             source_matrix=tuple(matrix),
             output_matrix=tuple(replacement),
         ))
