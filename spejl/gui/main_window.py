@@ -7,7 +7,7 @@ from uuid import uuid4
 from pathlib import Path
 
 from PySide6.QtCore import QRectF, QThread, QTimer, QUrl, Qt
-from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (
     QButtonGroup,
     QDialog,
@@ -43,6 +43,7 @@ from spejl.gui.update_checker import UpdateCheckWorker, UpdateInfo
 from spejl.gui.widgets import DropZone, ScaledImageLabel, SUPPORTED_SUFFIXES
 from spejl.gui.worker import MirrorWorker, VerifyWorker
 from spejl.models import Axis, Document, Route
+from spejl.router import InputProblem, native_vector_pdf_problem
 from spejl.qa.verify import VerifyReport
 
 _ACCENT = "#37D5FF"
@@ -107,8 +108,27 @@ QPushButton#verifyButton:hover:!disabled {{ background: #14364C; }}
 #routeBadge {{ font-size: 11px; font-weight: 600; padding: 3px 8px; border-radius: 4px; }}
 #routeBadge[route="vector"] {{ background: rgba(10, 110, 138, 0.15); color: {_ACCENT}; }}
 #routeBadge[route="raster"] {{ background: rgba(162, 76, 7, 0.15); color: #A24C07; }}
+#routeBadge[route="blocked"] {{ background: rgba(214, 69, 65, 0.18); color: #FF8A80; }}
 #previewCaption {{ font-weight: 600; padding: 4px 0; color: #9EE5F7; }}
 """
+
+
+_PROBLEM_COLOR = QColor("#FFB74D")
+
+
+def _failure_summary(failed: list[BatchEntry]) -> str:
+    """Why a batch's plans failed, in one line for the status label.
+
+    The per-plan reason otherwise lives only in a tooltip, so a summary of
+    "2 failed" alone leaves the user guessing.
+    """
+    if len(failed) == 1:
+        return failed[0].error or ""
+    problems = [entry.input_problem for entry in failed]
+    if None not in problems and len({problem.badge for problem in problems}) == 1:
+        who = "Both" if len(failed) == 2 else f"All {len(failed)}"
+        return f"{who}: {problems[0].reason}"
+    return "Select a ✖ plan in Mirrored to see why it failed."
 
 
 class MainWindow(QMainWindow):
@@ -920,7 +940,9 @@ class MainWindow(QMainWindow):
             if path in self._batch_entries:
                 continue
             name, warning = mirrored_filename(path)
-            self._batch_entries[path] = BatchEntry(path, name, warning)
+            entry = BatchEntry(path, name, warning)
+            entry.input_problem = native_vector_pdf_problem(path)
+            self._batch_entries[path] = entry
             self._batch_order.append(path)
             added.append(path)
         if not added:
@@ -935,11 +957,20 @@ class MainWindow(QMainWindow):
         self._select_batch_entry(added[0])
         self._mirror_button.setEnabled(not self._job_running())
         warnings = sum(self._batch_entries[path].naming_warning for path in added)
+        problems = [self._batch_entries[path].input_problem for path in added
+                    if self._batch_entries[path].input_problem is not None]
         status_parts = [f"Added {len(added)} plan(s)."]
         if rejected:
             status_parts.append(f"Skipped {rejected} non-PDF or missing file(s); upload vector PDFs only.")
         if warnings:
             status_parts.append(f"{warnings} filename(s) have no R/S orientation field.")
+        if problems:
+            status_parts.append(
+                f"⚠ {problems[0].detail}" if len(problems) == 1
+                else f"⚠ {len(problems)} cannot be mirrored: {problems[0].reason}"
+                if len({problem.badge for problem in problems}) == 1
+                else f"⚠ {len(problems)} cannot be mirrored; select a ⚠ plan to see why."
+            )
         self._status_label.setText(" ".join(status_parts))
 
     def _on_file_chosen(self, path: Path) -> None:
@@ -955,17 +986,24 @@ class MainWindow(QMainWindow):
             marks = {"queued": "○", "processing": "◌", "completed": "✓", "failed": "✖"}
             for path in self._batch_order:
                 entry = self._batch_entries[path]
-                uploaded = QListWidgetItem(entry.display_name or path.name)
+                problem = entry.input_problem
+                name = entry.display_name or path.name
+                uploaded = QListWidgetItem(f"⚠  {name}" if problem else name)
                 uploaded.setData(Qt.ItemDataRole.UserRole, str(path))
-                uploaded.setToolTip(str(path))
+                uploaded.setToolTip(f"{path}\n\n{problem.detail}" if problem else str(path))
+                if problem:
+                    uploaded.setForeground(_PROBLEM_COLOR)
                 self._uploaded_list.addItem(uploaded)
-                mirrored = QListWidgetItem(f"{marks.get(entry.status, '○')}  {entry.mirrored_name}")
+                mark = "⚠" if problem and entry.status == "queued" else marks.get(entry.status, "○")
+                mirrored = QListWidgetItem(f"{mark}  {entry.mirrored_name}")
                 mirrored.setData(Qt.ItemDataRole.UserRole, str(path))
-                mirrored.setToolTip(entry.error or entry.mirrored_name)
+                mirrored.setToolTip(entry.error or (problem.detail if problem else entry.mirrored_name))
                 if entry.status == "completed":
                     mirrored.setForeground(Qt.GlobalColor.darkGreen)
                 elif entry.status == "failed":
                     mirrored.setForeground(Qt.GlobalColor.red)
+                elif problem:
+                    mirrored.setForeground(_PROBLEM_COLOR)
                 elif entry.naming_warning:
                     mirrored.setForeground(Qt.GlobalColor.darkYellow)
                 self._mirrored_list.addItem(mirrored)
@@ -1126,7 +1164,7 @@ class MainWindow(QMainWindow):
                 route = sniff_route(path)
             except ValueError:
                 route = None
-        self._show_route_badge(route)
+        self._show_route_badge(route, entry.input_problem)
 
         pixmap = load_preview(path, dpi=self._preview_dpi,
                               page_index=self._document_session.page_index)
@@ -1139,18 +1177,25 @@ class MainWindow(QMainWindow):
             self._flags_list.clear()
             self._review_summary.setText(
                 "Processing…" if entry.status == "processing" else
-                "Processing failed" if entry.status == "failed" else "Ready to mirror"
+                "Processing failed" if entry.status == "failed" else
+                "Cannot be mirrored — see the message below" if entry.input_problem else
+                "Ready to mirror"
             )
         if entry.error:
             self._status_label.setText(entry.error)
+        elif entry.input_problem is not None and entry.output is None:
+            self._status_label.setText(f"⚠ {entry.input_problem.detail}")
         elif entry.output is not None:
             self._set_status_with_overlap("Plan ready for review.")
         self._sync_preview_scale()
         if pixmap is None:
             self._status_label.setText("Could not preview this file — mirroring may still work.")
 
-    def _show_route_badge(self, route: Route | None) -> None:
-        if route is Route.VECTOR:
+    def _show_route_badge(self, route: Route | None, problem: InputProblem | None = None) -> None:
+        if problem is not None:
+            self._route_badge.setText(f"⚠ {problem.badge}")
+            self._route_badge.setProperty("route", "blocked")
+        elif route is Route.VECTOR:
             self._route_badge.setText("PDF input — native text remains editable")
             self._route_badge.setProperty("route", "vector")
         elif route is Route.RASTER:
@@ -1175,6 +1220,15 @@ class MainWindow(QMainWindow):
             # _on_file_chosen's own comment for exactly the scenario
             # (a second worker silently orphaning the first, still-
             # running one) this and that guard together close off.
+            return
+        problems = [self._batch_entries[path].input_problem for path in self._batch_order]
+        if all(problem is not None for problem in problems):
+            self._status_label.setText(
+                f"⚠ Nothing to mirror: {problems[0].detail}" if len(problems) == 1
+                else f"⚠ None of the {len(problems)} uploaded plans can be mirrored: "
+                     + (problems[0].reason if len({p.badge for p in problems}) == 1
+                        else "select a ⚠ plan to see why.")
+            )
             return
         dialog = MirrorSelectionDialog([self._batch_entries[path] for path in self._batch_order], self)
         if dialog.exec() != QDialog.DialogCode.Accepted:
@@ -1206,8 +1260,14 @@ class MainWindow(QMainWindow):
             self._mirror_button.setEnabled(bool(self._batch_order))
             self._save_button.setEnabled(bool(self._batch_order))
             completed = sum(entry.status == "completed" for entry in self._batch_entries.values())
-            failed = sum(entry.status == "failed" for entry in self._batch_entries.values())
-            self._status_label.setText(f"Batch complete: {completed} mirrored" + (f", {failed} failed" if failed else ""))
+            failed = [entry for entry in self._batch_entries.values() if entry.status == "failed"]
+            skipped = sum(entry.status == "queued" and entry.input_problem is not None
+                          for entry in self._batch_entries.values())
+            self._status_label.setText(
+                f"Batch complete: {completed} mirrored"
+                + (f", {len(failed)} failed. {_failure_summary(failed)}" if failed else ".")
+                + (f" Skipped {skipped} ⚠ plan(s) that cannot be mirrored." if skipped else "")
+            )
             return
         job_input = self._batch_queue.pop(0)
         entry = self._batch_entries[job_input]

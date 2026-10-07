@@ -24,10 +24,14 @@ class MirrorSelectionDialog(QDialog):
         layout.addWidget(QLabel("Select the uploaded PDFs to mirror:"))
         self.list = QListWidget()
         for entry in entries:
-            item = QListWidgetItem(entry.display_name or entry.source.name)
+            name = entry.display_name or entry.source.name
+            problem = entry.input_problem
+            # A plan that is known to fail starts unchecked, so a mixed batch
+            # mirrors its good plans without a run of predictable failures.
+            item = QListWidgetItem(f"⚠  {name} — {problem.badge}" if problem else name)
             item.setData(Qt.ItemDataRole.UserRole, str(entry.source))
-            item.setToolTip(str(entry.source))
-            item.setCheckState(Qt.CheckState.Checked)
+            item.setToolTip(f"{entry.source}\n\n{problem.detail}" if problem else str(entry.source))
+            item.setCheckState(Qt.CheckState.Unchecked if problem else Qt.CheckState.Checked)
             self.list.addItem(item)
         layout.addWidget(self.list)
         controls = QHBoxLayout()

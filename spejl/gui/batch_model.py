@@ -8,6 +8,7 @@ from pathlib import Path
 import re
 
 from spejl.models import Document, Route
+from spejl.router import InputProblem
 
 
 _ORIENTATION_FIELD = re.compile(r"(?<=-)([RS])(?=-V\d+(?:-|$))")
@@ -45,3 +46,6 @@ class BatchEntry:
     diff_overlay: Path | None = None
     overlap_findings: list[tuple[int, str]] = field(default_factory=list)
     overlaps_checked: bool = False
+    # Set on upload when the PDF cannot be mirrored (e.g. embedded pictures),
+    # so the reason shows before the user ever clicks Mirror.
+    input_problem: InputProblem | None = None
