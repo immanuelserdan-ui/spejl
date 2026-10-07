@@ -13,14 +13,14 @@ jobs:
     runs-on: windows-latest
     steps:
       - name: Check out source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set release version
         shell: pwsh
         run: echo "APP_VERSION=0.1.${{ github.run_number }}" >> $env:GITHUB_ENV
 
       - name: Set up Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v7
         with:
           python-version: "3.12"
 
@@ -51,7 +51,7 @@ jobs:
             installer\Spejl.iss
 
       - name: Publish GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           tag_name: v${{ env.APP_VERSION }}
           name: Spejl ${{ env.APP_VERSION }}
