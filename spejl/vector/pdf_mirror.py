@@ -226,10 +226,17 @@ def _fit_page_content_stream(
     )
     dx = safe.x0 + (safe.width - bounds.width * scale) / 2 - bounds.x0 * scale
     dy = safe.y0 + (safe.height - bounds.height * scale) / 2 - bounds.y0 * scale
-    # PDF's default user space has its origin at the bottom-left, while the
-    # bounds above use PyMuPDF's top-left page coordinates.
-    pdf_dy = height * (1 - scale) - dy
-    matrix = f"q\n{scale:.10f} 0 0 {scale:.10f} {dx:.10f} {pdf_dy:.10f} cm\n".encode("ascii")
+    # The fit above is in PyMuPDF's top-left page coordinates, but ``cm``
+    # acts in PDF user space, whose origin is wherever the MediaBox puts it
+    # (Revit/Adobe exports often centre it on the sheet). Conjugate the fit
+    # by the page's user-space-to-page matrix so it lands where it was
+    # measured for any MediaBox origin.
+    to_page = page.transformation_matrix
+    fit = pymupdf.Matrix(scale, 0, 0, scale, dx, dy)
+    cm = to_page * fit * ~to_page
+    matrix = (
+        f"q\n{cm.a:.10f} {cm.b:.10f} {cm.c:.10f} {cm.d:.10f} {cm.e:.10f} {cm.f:.10f} cm\n"
+    ).encode("ascii")
     return matrix + content + b"\nQ\n", True
 
 

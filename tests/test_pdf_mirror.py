@@ -393,3 +393,47 @@ def test_rotate_param_reports_the_true_rounding_cost(angle_deg, expected_rotate,
     rotate, deviation = _rotate_param(dx, dy)
     assert rotate == expected_rotate
     assert deviation == pytest.approx(expected_deviation, abs=0.1)
+
+
+def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
+    """Revit/Adobe exports often centre user space on the sheet
+    (``/MediaBox [-w/2 -h/2 w/2 h/2]``). The fit ``cm`` must be built in
+    that user space, not assume a bottom-left origin."""
+    import pikepdf
+
+    source = tmp_path / "centred-origin.pdf"
+    output = tmp_path / "centred-origin-mirrored.pdf"
+    pdf = pikepdf.Pdf.new()
+    font = pdf.make_indirect(pikepdf.Dictionary(
+        Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Helvetica,
+    ))
+    # The wall spans nearly the whole sheet, so the fit has to scale it
+    # down as well as translate it -- the case a wrong origin breaks.
+    content = (
+        b"0 0 0 RG 2 w\n-99 -99 m -99 99 l 99 99 l 99 -99 l h S\n"
+        b"BT /F1 12 Tf 1 0 0 1 -40 0 Tm (Stue) Tj ET\n"
+    )
+    pdf.add_blank_page(page_size=(200, 200))
+    page = pdf.pages[0]
+    page.MediaBox = pikepdf.Array([-100, -100, 100, 100])
+    page.Resources = pikepdf.Dictionary(Font=pikepdf.Dictionary(F1=font))
+    page.Contents = pdf.make_stream(content)
+    pdf.save(source)
+
+    mirror_pdf(source, output, axis=Axis.VERTICAL)
+    with pymupdf.open(output) as mirrored:
+        page = mirrored[0]
+        bounds = None
+        for kind, bbox in page.get_bboxlog():
+            if kind.startswith("clip-") or kind == "group":
+                continue
+            rect = pymupdf.Rect(bbox)
+            if bounds is None:
+                bounds = rect
+            else:
+                bounds.include_rect(rect)
+        assert bounds is not None
+        assert bounds.x0 >= 5.0 - 0.1
+        assert bounds.y0 >= 5.0 - 0.1
+        assert bounds.x1 <= page.rect.width - 5.0 + 0.1
+        assert bounds.y1 <= page.rect.height - 5.0 + 0.1
