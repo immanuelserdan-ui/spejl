@@ -56,12 +56,14 @@ class InputProblem:
 
     ``badge`` is a few words for the source-pane badge and list markers;
     ``reason`` is the actionable explanation, and ``where`` names the file
-    (and page) it applies to.
+    (and page) it applies to. ``kind`` is ``"mixed-image"`` for vector text
+    over embedded pictures, which assisted mirroring can handle.
     """
 
     badge: str
     where: str
     reason: str
+    kind: str = "other"
 
     @property
     def detail(self) -> str:
@@ -107,6 +109,7 @@ def native_vector_pdf_problem(path: Path) -> InputProblem | None:
                     )
                     + "Re-export with Vector processing (in Revit, also avoid "
                     "transparency, shadows and shaded views).",
+                    kind="mixed-image",
                 )
     except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
         return InputProblem("Unreadable PDF", path.name, f"could not read as a valid PDF ({exc}).")

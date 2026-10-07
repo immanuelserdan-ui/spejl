@@ -22,11 +22,15 @@ class MirrorWorker(QThread):
     succeeded = Signal(object, object)  # Document, Route
     failed = Signal(str)
 
-    def __init__(self, input_path: Path, output_path: Path, axis: Axis) -> None:
+    def __init__(self, input_path: Path, output_path: Path, axis: Axis,
+                 picture_labels: list | None = None) -> None:
         super().__init__()
         self.input_path = input_path
         self.output_path = output_path
         self.axis = axis
+        # Lettering the user confirmed inside a mixed PDF's pictures; when
+        # given, the plan is mirrored with assisted mirroring instead.
+        self.picture_labels = picture_labels
 
     def run(self) -> None:
         try:
@@ -40,15 +44,45 @@ class MirrorWorker(QThread):
             return
 
         try:
-            validate_native_vector_pdf(self.input_path)
-            from spejl.vector.pdf_mirror import mirror_pdf
+            document: Document
+            if self.picture_labels is not None:
+                from spejl.vector.mixed_pdf import mirror_mixed_pdf
 
-            document: Document = mirror_pdf(self.input_path, self.output_path, axis=self.axis)
+                document = mirror_mixed_pdf(
+                    self.input_path, self.output_path, self.axis, self.picture_labels
+                )
+            else:
+                validate_native_vector_pdf(self.input_path)
+                from spejl.vector.pdf_mirror import mirror_pdf
+
+                document = mirror_pdf(self.input_path, self.output_path, axis=self.axis)
         except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
             self.failed.emit(str(exc))
             return
 
         self.succeeded.emit(document, route)
+
+
+class PictureScanWorker(QThread):
+    """Reads lettering inside a mixed PDF's pictures off the UI thread
+    (OCR takes a few seconds per picture)."""
+
+    succeeded = Signal(object)  # list[PictureLabel]
+    failed = Signal(str)
+
+    def __init__(self, input_path: Path) -> None:
+        super().__init__()
+        self.input_path = input_path
+
+    def run(self) -> None:
+        try:
+            from spejl.vector.mixed_pdf import find_picture_labels
+
+            labels = find_picture_labels(self.input_path)
+        except Exception as exc:  # noqa: BLE001 — surfaced to the user, not swallowed
+            self.failed.emit(str(exc))
+            return
+        self.succeeded.emit(labels)
 
 
 class VerifyWorker(QThread):

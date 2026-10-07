@@ -49,3 +49,13 @@ class BatchEntry:
     # Set on upload when the PDF cannot be mirrored (e.g. embedded pictures),
     # so the reason shows before the user ever clicks Mirror.
     input_problem: InputProblem | None = None
+    # Lettering the user confirmed inside a mixed PDF's pictures (assisted
+    # mirroring); None until reviewed. A reviewed plan is mirrorable.
+    picture_labels: list | None = None
+    # The last OCR scan of those pictures, so reopening the review is instant.
+    picture_scan: list | None = None
+
+    @property
+    def blocking_problem(self) -> InputProblem | None:
+        """The upload problem that still stops this plan being mirrored."""
+        return None if self.picture_labels is not None else self.input_problem
