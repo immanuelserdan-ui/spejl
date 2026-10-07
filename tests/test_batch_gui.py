@@ -440,6 +440,38 @@ def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
         mirror_jpeg = tmp_path / "634-T01-A00-S-V00-R00.jpg"
         assert source_jpeg.read_bytes().startswith(b"\xff\xd8")
         assert mirror_jpeg.read_bytes().startswith(b"\xff\xd8")
+        # Tagged 300 dpi, so CAD tools place it at the sheet's true size.
+        import pymupdf
+        from PIL import Image
+
+        with pymupdf.open(str(source)) as doc:
+            sheet_width_in = doc[0].rect.width / 72
+        for jpeg in (source_jpeg, mirror_jpeg):
+            with Image.open(jpeg) as image:
+                assert image.info["dpi"] == pytest.approx((300, 300))
+                assert image.width / image.info["dpi"][0] == pytest.approx(sheet_width_in, abs=0.01)
+    finally:
+        window.close()
+
+
+def test_single_image_export_writes_its_dpi(qapp, tmp_path):
+    import pymupdf
+    from PIL import Image
+    from spejl.gui.main_window import MainWindow
+
+    pdf = tmp_path / "mirrored.pdf"
+    with pymupdf.open() as doc:
+        page = doc.new_page(width=144, height=72)
+        page.insert_text((10, 40), "Stue")
+        doc.save(pdf)
+    window = MainWindow()
+    try:
+        window._output_path = pdf
+        for name in ("plan.jpg", "plan.png", "plan.tif"):
+            window._export_mirrored_image(tmp_path / name)
+            with Image.open(tmp_path / name) as image:
+                assert image.size == (600, 300)
+                assert image.info["dpi"] == pytest.approx((300, 300), abs=0.01)  # TIFF stores a ratio
     finally:
         window.close()
 
