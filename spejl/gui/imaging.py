@@ -37,7 +37,10 @@ def pdf_page_count(path: Path) -> int:
         return 1
     import pymupdf
 
-    doc = pymupdf.open(str(path))
+    try:
+        doc = pymupdf.open(str(path))
+    except Exception:  # noqa: BLE001 — an unreadable PDF has no pages to show
+        return 0
     try:
         return doc.page_count
     finally:
@@ -50,7 +53,10 @@ def load_preview(path: Path, dpi: int = 150, page_index: int = 0) -> QPixmap | N
     if suffix == ".pdf":
         import pymupdf
 
-        doc = pymupdf.open(str(path))
+        try:
+            doc = pymupdf.open(str(path))
+        except Exception:  # noqa: BLE001 — a damaged PDF has no preview; the upload check explains why
+            return None
         try:
             if doc.page_count == 0:
                 return None

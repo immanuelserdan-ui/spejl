@@ -203,3 +203,46 @@ def test_batch_summary_names_the_shared_failure_reason(tmp_path):
 
     other = BatchEntry(tmp_path / "c.pdf", "c.pdf", status="failed", error="Text transform QA failed")
     assert _failure_summary([*entries, other]) == "Select a ✖ plan in Mirrored to see why it failed."
+
+
+def test_corrupt_pdf_upload_is_explained_not_a_crash(qapp, tmp_path, monkeypatch):
+    """A damaged .pdf next to a good plan: no exception, the reason is shown,
+    and the good plan still mirrors."""
+    import time
+
+    from PySide6.QtCore import QCoreApplication
+
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog, PdfPreviewDialog
+    from spejl.gui.main_window import MainWindow
+
+    broken = tmp_path / "634-T02-A00-S-V00-R00.pdf"
+    broken.write_bytes(b"%PDF-1.7\nnot really a pdf")
+    good = _pdf(tmp_path / "634-T01-A00-S-V00-R00.pdf")
+    selection = {}
+
+    def choose(dialog):
+        selection["ticked"] = dialog.selected_paths()
+        return 1
+
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", choose)
+    window = MainWindow()
+    try:
+        window._on_files_chosen([good, broken])  # used to raise FileDataError
+        window._select_batch_entry(broken.resolve())
+        assert window._route_badge.text() == "⚠ Unreadable PDF"
+        assert window._status_label.text().startswith("⚠ 634-T02-A00-S-V00-R00.pdf: could not read as a valid PDF")
+        preview = PdfPreviewDialog(broken.resolve())
+        assert "could not be read" in preview.image.text()
+        preview.close()
+
+        window._on_mirror_clicked()
+        assert selection["ticked"] == [good.resolve()]
+        end = time.time() + 30
+        entry = window._batch_entries[good.resolve()]
+        while time.time() < end and entry.status != "completed":
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+        assert entry.status == "completed"
+        assert window._batch_entries[broken.resolve()].status == "queued"
+    finally:
+        window.close()
