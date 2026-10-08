@@ -48,3 +48,69 @@ Name: "{autodesktop}\Spejl"; Filename: "{app}\Spejl.exe"; WorkingDir: "{app}"; T
 
 [Run]
 Filename: "{app}\Spejl.exe"; Description: "Launch Spejl"; Flags: nowait postinstall skipifsilent
+
+[Code]
+// A Spejl.exe left running -- often invisible, e.g. after OmniBIM closed while
+// hosting it -- keeps Spejl.exe and its DLLs locked, and copying failed halfway
+// with "DeleteFile failed; code 5. Access is denied." Find any Spejl.exe of
+// the current user (old versions included) and offer to close it first.
+
+function SpejlRunning(): Boolean;
+var
+  ResultCode: Integer;
+  Output: AnsiString;
+  ListFile: String;
+begin
+  Result := False;
+  ListFile := AddBackslash(GetTempDir) + 'spejl-setup-tasks.txt';
+  if Exec(ExpandConstant('{cmd}'),
+          '/C tasklist /NH /FI "IMAGENAME eq Spejl.exe" /FI "USERNAME eq ' + GetUserNameString + '" > "' + ListFile + '"',
+          '', SW_HIDE, ewWaitUntilTerminated, ResultCode) then
+  begin
+    if LoadStringFromFile(ListFile, Output) then
+      Result := Pos('spejl.exe', Lowercase(String(Output))) > 0;
+  end;
+  DeleteFile(ListFile);
+end;
+
+function CloseSpejl(): Boolean;
+var
+  ResultCode, Attempt: Integer;
+begin
+  Result := not SpejlRunning();
+  if Result then
+    exit;
+  if SuppressibleMsgBox('Spejl is still running on this PC, possibly in the background without a window '
+                        + '(for example after OmniBIM was closed).' + #13#10#13#10
+                        + 'Setup needs to close it to update Spejl. Unsaved mirrored plans will be lost. '
+                        + 'Close Spejl now?', mbConfirmation, MB_YESNO, IDYES) <> IDYES then
+    exit;
+  Exec(ExpandConstant('{sys}\taskkill.exe'),
+       '/F /IM Spejl.exe /FI "USERNAME eq ' + GetUserNameString + '"',
+       '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  for Attempt := 1 to 20 do
+  begin
+    if not SpejlRunning() then
+    begin
+      Result := True;
+      exit;
+    end;
+    Sleep(250);
+  end;
+end;
+
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+begin
+  Result := '';
+  if not CloseSpejl() then
+    Result := 'Spejl is still running. Open Task Manager, go to the Details tab, end every '
+              + 'Spejl.exe, then run Setup again.';
+end;
+
+function InitializeUninstall(): Boolean;
+begin
+  Result := CloseSpejl();
+  if not Result then
+    MsgBox('Spejl is still running. Open Task Manager, go to the Details tab, end every '
+           + 'Spejl.exe, then run the uninstaller again.', mbError, MB_OK);
+end;
