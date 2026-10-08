@@ -114,21 +114,54 @@ def test_mirror_with_only_problem_plans_explains_instead_of_failing(qapp, tmp_pa
     from spejl.gui.batch_dialogs import MirrorSelectionDialog
     from spejl.gui.main_window import MainWindow
 
-    paths = [
-        _pdf(tmp_path / f"634-T0{i}-A00-S-V00-R00.pdf", image=pymupdf.Rect(0, 0, 200, 300))
-        for i in (1, 2)
-    ]
+    # A problem no review can fix (picture-drawn plans go through the
+    # picture text review instead; see test_mixed_pdf.py).
+    from spejl.router import InputProblem
+
+    paths = [_pdf(tmp_path / f"634-T0{i}-A00-S-V00-R00.pdf") for i in (1, 2)]
     window = MainWindow()
     try:
         window._on_files_chosen(paths)
+        for path in paths:
+            window._batch_entries[path.resolve()].input_problem = InputProblem(
+                "Unreadable PDF", path.name, "could not read as a valid PDF (test).")
         monkeypatch.setattr(
             MirrorSelectionDialog, "exec",
             lambda self: pytest.fail("no dialog when nothing can be mirrored"),
         )
         window._on_mirror_clicked()
-        assert window._worker is None
+        assert window._worker is None and window._picture_scan_worker is None
         text = window._status_label.text()
-        assert text.startswith("⚠ None of the 2 uploaded plans can be mirrored: contains embedded image content")
+        assert text.startswith("⚠ None of the 2 uploaded plans can be mirrored: could not read as a valid PDF")
+    finally:
+        window.close()
+
+
+def test_cancelled_review_of_the_only_plan_says_so(qapp, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QDialog
+
+    from spejl.gui import main_window as mw
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.picture_review import PictureTextDialog
+    from spejl.vector import mixed_pdf
+
+    path = _pdf(tmp_path / "634-T01-A00-S-V00-R00.pdf", image=pymupdf.Rect(0, 0, 200, 300))
+    monkeypatch.setattr(mixed_pdf, "find_picture_labels", lambda p: [])
+    monkeypatch.setattr(PictureTextDialog, "exec", lambda self: QDialog.DialogCode.Rejected)
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", lambda self: pytest.fail("nothing to mirror"))
+    window = mw.MainWindow()
+    try:
+        window._on_files_chosen([path])
+        window._on_mirror_clicked()
+        import time
+
+        from PySide6.QtCore import QCoreApplication
+
+        end = time.time() + 10
+        while time.time() < end and "review was cancelled" not in window._status_label.text():
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+        assert window._status_label.text().startswith("Nothing to mirror: the picture text review was cancelled")
     finally:
         window.close()
 

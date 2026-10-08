@@ -115,7 +115,7 @@ def _ink_box(gray: np.ndarray, box: tuple[float, float, float, float], pad: int 
     Lines that merely pass through the OCR box (a cell border, a wall) are
     excluded: only dark components lying wholly inside the padded box count.
     """
-    from scipy import ndimage
+    import cv2
 
     h, w = gray.shape
     x0, y0, x1, y1 = (math.floor(box[0]) - pad, math.floor(box[1]) - pad,
@@ -123,19 +123,18 @@ def _ink_box(gray: np.ndarray, box: tuple[float, float, float, float], pad: int 
     x0, y0, x1, y1 = max(x0, 0), max(y0, 0), min(x1, w), min(y1, h)
     margin = 12
     rx0, ry0, rx1, ry1 = max(x0 - margin, 0), max(y0 - margin, 0), min(x1 + margin, w), min(y1 + margin, h)
-    labels, _count = ndimage.label(gray[ry0:ry1, rx0:rx1] < 128)
-    keep = np.zeros_like(labels, dtype=bool)
-    for index, sl in enumerate(ndimage.find_objects(labels), start=1):
-        if sl is None:
-            continue
-        cy0, cy1 = sl[0].start + ry0, sl[0].stop + ry0
-        cx0, cx1 = sl[1].start + rx0, sl[1].stop + rx0
+    dark = np.ascontiguousarray(gray[ry0:ry1, rx0:rx1] < 128, dtype=np.uint8)
+    count, _labels, stats, _centroids = cv2.connectedComponentsWithStats(dark, connectivity=4)
+    kept: list[tuple[int, int, int, int]] = []
+    for index in range(1, count):  # 0 is the background
+        cx0, cy0 = int(stats[index, cv2.CC_STAT_LEFT]) + rx0, int(stats[index, cv2.CC_STAT_TOP]) + ry0
+        cx1 = cx0 + int(stats[index, cv2.CC_STAT_WIDTH])
+        cy1 = cy0 + int(stats[index, cv2.CC_STAT_HEIGHT])
         if cx0 >= x0 and cy0 >= y0 and cx1 <= x1 and cy1 <= y1:
-            keep |= labels == index
-    ys, xs = np.where(keep)
-    if len(xs) == 0:
+            kept.append((cx0, cy0, cx1, cy1))
+    if not kept:
         return (max(int(box[0]), 0), max(int(box[1]), 0), min(math.ceil(box[2]), w), min(math.ceil(box[3]), h))
-    return (int(xs.min()) + rx0, int(ys.min()) + ry0, int(xs.max()) + rx0 + 1, int(ys.max()) + ry0 + 1)
+    return (min(k[0] for k in kept), min(k[1] for k in kept), max(k[2] for k in kept), max(k[3] for k in kept))
 
 
 def _looks_like_text(text: str) -> bool:

@@ -33,6 +33,19 @@ jobs:
           Set-Content -Path spejl\_build_version.py -Value "__version__ = '$env:APP_VERSION'" -Encoding utf8
           python -m PyInstaller spejl.spec --noconfirm --clean --workpath build-installer --distpath dist-installer
 
+      # The build leaves out libraries Spejl never loads (see spejl.spec). Prove
+      # the frozen app still works before anything is published.
+      - name: Self-test the frozen app
+        shell: pwsh
+        run: |
+          $report = Join-Path $PWD "self-test"
+          $process = Start-Process -FilePath "dist-installer\Spejl\Spejl.exe" -ArgumentList "--self-test", "`"$report`"" -Wait -PassThru
+          Get-Content (Join-Path $report "self-test.json")
+          if ($process.ExitCode -ne 0) { throw "Frozen app self-test failed (exit $($process.ExitCode))." }
+
+      - name: Check the frozen app opens its window
+        run: python tools/smoke_packaged_app.py dist-installer/Spejl/Spejl.exe --timeout 90
+
       - name: Stage installer payload
         run: python tools/prepare_installer.py dist-installer/Spejl installer/payload
 

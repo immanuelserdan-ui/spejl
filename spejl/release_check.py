@@ -61,6 +61,30 @@ def run(directory: str) -> int:
         if not any("1234" in reading.text for reading in backend.detect_and_recognise(rendered)):
             raise RuntimeError("Mirrored raster label could not be read back.")
         report["checks"].append("raster mirroring and output OCR")
+
+        # Assisted mirroring: a picture-drawn plan whose label was confirmed.
+        from spejl.models import Axis
+        from spejl.vector.mixed_pdf import PictureLabel, _ink_box, find_picture_labels, mirror_mixed_pdf
+
+        mixed_pdf = output / "mixed.pdf"
+        mixed_out = output / "mixed_mirrored.pdf"
+        with pymupdf.open() as doc:
+            page = doc.new_page(width=500, height=325)  # the 1000 x 650 picture at 144 dpi
+            page.insert_image(page.rect, filename=str(source_png))
+            page.insert_text((20, 315), "Bad", fontsize=12)
+            doc.save(mixed_pdf)
+        find_picture_labels(mixed_pdf, backend=backend)
+        with pymupdf.open(mixed_pdf) as doc:
+            xref = doc[0].get_images(full=True)[0][0]
+        gray = np.asarray(image.convert("L"), dtype=float)
+        ink = _ink_box(gray, (160, 230, 700, 320))
+        label = PictureLabel(0, xref, "Stue 1234", 0.0, ink, tuple(v / 2 for v in ink), 1.0, True)
+        mirror_mixed_pdf(mixed_pdf, mixed_out, Axis.VERTICAL, [label])
+        with pymupdf.open(mixed_out) as doc:
+            words = doc[0].get_text()
+        if "Stue 1234" not in words or "Bad" not in words:
+            raise RuntimeError("Assisted mirroring lost a label.")
+        report["checks"].append("assisted mirroring of a picture-drawn plan")
         report["status"] = "passed"
     except Exception:
         report["error"] = traceback.format_exc()

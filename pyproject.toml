@@ -24,7 +24,6 @@ raster = [
     "pillow>=10.3",
     "rapidocr-onnxruntime>=1.3",
     "rapidfuzz>=3.9",
-    "scipy>=1.13",
     "fonttools>=4.53",  # S8 QA gate: font cmap lookup, see qa/self_correct.py
 ]
 gui = [

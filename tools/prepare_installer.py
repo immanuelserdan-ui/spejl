@@ -15,7 +15,7 @@ RUNTIME_PACKAGES = (
     "markdown-it-py", "mdurl", "numpy", "onnxruntime", "opencv-python",
     "packaging", "pikepdf", "pillow", "protobuf", "pyclipper", "Pygments",
     "pymupdf", "PySide6", "PySide6_Addons", "PySide6_Essentials", "PyYAML",
-    "RapidFuzz", "rapidocr-onnxruntime", "rich", "scipy", "shapely",
+    "RapidFuzz", "rapidocr-onnxruntime", "rich", "shapely",
     "shellingham", "shiboken6", "six", "typer", "typing_extensions",
 )
 
