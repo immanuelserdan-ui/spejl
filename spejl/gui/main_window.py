@@ -165,6 +165,10 @@ class MainWindow(QMainWindow):
         self._update_thread: QThread | None = None
         self._update_worker: UpdateCheckWorker | None = None
         self._picture_scan_worker: PictureScanWorker | None = None
+        # Mirror Plan reviews picture-drawn plans first, one after another.
+        self._review_queue: list[Path] = []
+        self._review_total = 0
+        self._review_declined: set[Path] = set()
         self._batch_entries: dict[Path, BatchEntry] = {}
         self._batch_order: list[Path] = []
         self._batch_queue: list[Path] = []
@@ -625,6 +629,9 @@ class MainWindow(QMainWindow):
         self._drop_zone.clear()
         self._route_badge.hide()
         self._review_picture_button.hide()
+        self._review_queue = []
+        self._review_total = 0
+        self._review_declined = set()
         self._source_filename_label.setText("No file selected")
         self._source_filename_label.setToolTip("")
         self._mirrored_filename_label.setText("No file selected")
@@ -991,7 +998,8 @@ class MainWindow(QMainWindow):
             )
             if any(problem.kind == "mixed-image" for problem in problems):
                 status_parts.append(
-                    "Select a ⚠ plan and click Review picture text… to mirror it with your help."
+                    "Click Mirror Plan: Spejl will ask you to confirm the lettering inside "
+                    "their pictures first."
                 )
         self._status_label.setText(" ".join(status_parts))
 
@@ -1210,7 +1218,7 @@ class MainWindow(QMainWindow):
             problem = entry.blocking_problem
             self._status_label.setText(
                 f"⚠ {problem.detail}"
-                + (" Or click Review picture text… to confirm its lettering and mirror it anyway."
+                + (" Click Mirror Plan to confirm its lettering and mirror it anyway."
                    if problem.kind == "mixed-image" else "")
             )
         elif entry.picture_labels is not None and entry.output is None:
@@ -1240,10 +1248,45 @@ class MainWindow(QMainWindow):
     def _picture_scan_running(self) -> bool:
         return self._picture_scan_worker is not None and self._picture_scan_worker.isRunning()
 
+    def _needs_picture_review(self, path: Path) -> bool:
+        problem = self._batch_entries[path].blocking_problem
+        return problem is not None and problem.kind == "mixed-image"
+
+    def _review_next_before_mirror(self) -> None:
+        """Review the next queued picture-drawn plan; then carry on mirroring."""
+        if not self._review_queue:
+            self._review_total = 0
+            self._on_mirror_clicked()
+            return
+        path = self._review_queue[0]
+        if path not in self._batch_entries:
+            self._review_queue.pop(0)
+            self._review_next_before_mirror()
+            return
+        self._select_batch_entry(path)
+        step = self._review_total - len(self._review_queue) + 1
+        self._status_label.setText(
+            f"Before mirroring: confirm the lettering inside plan {step} of {self._review_total} "
+            "whose walls are a picture…"
+        )
+        entry = self._batch_entries[path]
+        if entry.picture_scan is not None:
+            self._finish_review_before_mirror(path, entry.picture_scan)
+        else:
+            self._start_picture_scan(path)
+
+    def _finish_review_before_mirror(self, path: Path, labels: list) -> None:
+        step = self._review_total - len(self._review_queue) + 1
+        if not self._open_picture_review(path, labels, f"{step} of {self._review_total}"):
+            self._review_declined.add(path)
+        if self._review_queue and self._review_queue[0] == path:
+            self._review_queue.pop(0)
+        QTimer.singleShot(0, self._review_next_before_mirror)
+
     def _on_review_picture_clicked(self) -> None:
         path = self._input_path
         if path is None or path not in self._batch_entries or self._job_running() \
-                or self._picture_scan_running():
+                or self._picture_scan_running() or self._review_queue:
             return
         entry = self._batch_entries[path]
         if entry.picture_labels is not None:
@@ -1252,6 +1295,9 @@ class MainWindow(QMainWindow):
         if entry.picture_scan is not None:
             self._open_picture_review(path, entry.picture_scan)
             return
+        self._start_picture_scan(path)
+
+    def _start_picture_scan(self, path: Path) -> None:
         self._review_picture_button.setEnabled(False)
         self._mirror_button.setEnabled(False)
         self._progress.show()
@@ -1269,7 +1315,9 @@ class MainWindow(QMainWindow):
         if entry is None:
             return
         entry.picture_scan = labels
-        if path == self._input_path:
+        if self._review_queue and self._review_queue[0] == path:
+            self._finish_review_before_mirror(path, labels)
+        elif path == self._input_path:
             self._update_review_picture_button(entry)
             self._open_picture_review(path, labels)
 
@@ -1279,19 +1327,26 @@ class MainWindow(QMainWindow):
         if path in self._batch_entries and path == self._input_path:
             self._update_review_picture_button(self._batch_entries[path])
             self._status_label.setText(f"Couldn't read the picture's lettering: {message}")
+        if self._review_queue and self._review_queue[0] == path:
+            self._review_declined.add(path)
+            self._review_queue.pop(0)
+            QTimer.singleShot(0, self._review_next_before_mirror)
 
-    def _open_picture_review(self, path: Path, labels: list) -> None:
+    def _open_picture_review(self, path: Path, labels: list, step: str = "") -> bool:
         dialog = PictureTextDialog(path, labels, self)
+        if step:
+            dialog.setWindowTitle(f"{dialog.windowTitle()} ({step})")
         if dialog.exec() != QDialog.DialogCode.Accepted:
             self._status_label.setText("Picture text not confirmed; the plan still can't be mirrored.")
-            return
+            return False
         entry = self._batch_entries.get(path)
         if entry is None:
-            return
+            return False
         entry.picture_labels = dialog.labels()
         entry.status, entry.error = "queued", None
         self._refresh_batch_lists()
         self._select_batch_entry(path)
+        return True
 
     def _show_route_badge(self, route: Route | None, problem: InputProblem | None = None,
                           *, assisted: bool = False) -> None:
@@ -1327,8 +1382,27 @@ class MainWindow(QMainWindow):
             # (a second worker silently orphaning the first, still-
             # running one) this and that guard together close off.
             return
+        if self._picture_scan_running() or self._review_queue:
+            return
+        pending = [
+            path for path in self._batch_order
+            if self._needs_picture_review(path) and path not in self._review_declined
+        ]
+        if pending:
+            self._review_queue = pending
+            self._review_total = len(pending)
+            self._review_next_before_mirror()
+            return
+        declined = self._review_declined
+        self._review_declined = set()
         problems = [self._batch_entries[path].blocking_problem for path in self._batch_order]
         if all(problem is not None for problem in problems):
+            if declined and all(problem.kind == "mixed-image" for problem in problems):
+                self._status_label.setText(
+                    "Nothing to mirror: the picture text review was cancelled. Click Mirror Plan "
+                    "again to review it, or re-export the plan from Revit with Vector processing."
+                )
+                return
             self._status_label.setText(
                 f"⚠ Nothing to mirror: {problems[0].detail}" if len(problems) == 1
                 else f"⚠ None of the {len(problems)} uploaded plans can be mirrored: "

@@ -11,7 +11,6 @@ import pytest
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 pymupdf = pytest.importorskip("pymupdf")
 pytest.importorskip("cv2")
-pytest.importorskip("scipy")
 
 from spejl.detect.ocr import Detection
 from spejl.models import Axis
@@ -197,7 +196,7 @@ def test_review_unlocks_a_mixed_plan_and_feeds_the_mirror_job(qapp, mixed, monke
         entry = window._batch_entries[path.resolve()]
         assert entry.blocking_problem is not None and entry.blocking_problem.kind == "mixed-image"
         assert window._review_picture_button.isVisibleTo(window)
-        assert "Review picture text" in window._status_label.text()
+        assert "Click Mirror Plan" in window._status_label.text()
 
         seen = {}
 
@@ -254,3 +253,68 @@ def test_dialog_blocks_confirming_a_ticked_find_without_text(qapp, mixed):
         assert [label.include for label in dialog.labels()] == [False, False]
     finally:
         dialog.close()
+
+
+def test_mirror_plan_reviews_picture_drawn_plans_first(qapp, mixed, tmp_path, monkeypatch):
+    """One click: Mirror Plan walks through each unreviewed picture-drawn plan,
+    then shows the usual selection with the confirmed ones ticked."""
+    import shutil
+    import time
+
+    from PySide6.QtCore import QCoreApplication
+    from PySide6.QtWidgets import QDialog
+
+    from spejl.gui import main_window as mw
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.picture_review import PictureTextDialog
+
+    first, _ = mixed
+    second = tmp_path / "second.pdf"
+    shutil.copy(first, second)
+    vector = tmp_path / "vector.pdf"
+    with pymupdf.open() as doc:
+        doc.new_page().insert_text((50, 50), "Stue")
+        doc.save(vector)
+    real_find = mixed_pdf.find_picture_labels
+    monkeypatch.setattr(mixed_pdf, "find_picture_labels", lambda p: real_find(p, backend=object()))
+
+    reviews = []
+
+    def review(dialog):
+        reviews.append(dialog.windowTitle())
+        return QDialog.DialogCode.Accepted if len(reviews) == 1 else QDialog.DialogCode.Rejected
+
+    selection = {}
+
+    def choose(dialog):
+        selection["ticked"] = dialog.selected_paths()
+        return QDialog.DialogCode.Rejected  # stop before mirroring
+
+    monkeypatch.setattr(PictureTextDialog, "exec", review)
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", choose)
+    window = mw.MainWindow()
+    try:
+        window._on_files_chosen([first, second, vector])
+        window._on_mirror_clicked()
+        end = time.time() + 30
+        while time.time() < end and "ticked" not in selection:
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+        assert [title.split("(")[-1] for title in reviews] == ["1 of 2)", "2 of 2)"]
+        entries = window._batch_entries
+        assert entries[first.resolve()].picture_labels is not None
+        assert entries[second.resolve()].picture_labels is None  # review cancelled
+        assert selection["ticked"] == [first.resolve(), vector.resolve()]
+        assert window._review_queue == [] and window._review_declined == set()
+
+        # The next click asks about the cancelled plan again.
+        reviews.clear()
+        selection.clear()
+        window._on_mirror_clicked()
+        end = time.time() + 30
+        while time.time() < end and "ticked" not in selection:
+            QCoreApplication.processEvents()
+            time.sleep(0.01)
+        assert len(reviews) == 1
+    finally:
+        window.close()

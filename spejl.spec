@@ -71,7 +71,9 @@ a = Analysis(
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
-    excludes=[],
+    # SciPy is not used by the app; keep it out even if a library would
+    # import it opportunistically (it added ~20 MB to the installer).
+    excludes=["scipy"],
     noarchive=False,
 )
 
@@ -97,6 +99,15 @@ a.binaries = [
 runtime_names = {Path(source).name.lower() for source, _ in explicit_runtime_binaries}
 a.binaries = [binary for binary in a.binaries if str(binary[0]).lower() not in runtime_names]
 a.binaries += [(Path(source).name, source, "BINARY") for source, _ in explicit_runtime_binaries]
+# Large libraries Spejl never loads: OpenCV's video I/O plugin (~31 MB; Spejl
+# reads and writes still images only) and Qt's software OpenGL fallback
+# (~21 MB; Spejl's widgets paint without OpenGL). `--self-test` and the
+# packaged launch check in release.yml prove the trimmed app still runs.
+_UNUSED_BINARIES = ("opencv_videoio_ffmpeg", "opengl32sw")
+a.binaries = [
+    binary for binary in a.binaries
+    if not Path(binary[0]).name.lower().startswith(_UNUSED_BINARIES)
+]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
