@@ -14,6 +14,8 @@ from spejl import __version__
 
 REPOSITORY = "immanuelserdan-ui/spejl"
 RELEASES_URL = f"https://api.github.com/repos/{REPOSITORY}/releases/latest"
+# Environment variable that turns the startup check off (value "1").
+UPDATE_CHECK_OPT_OUT = "SPEJL_NO_UPDATE_CHECK"
 
 
 @dataclass(frozen=True)

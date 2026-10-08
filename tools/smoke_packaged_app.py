@@ -18,7 +18,7 @@ import tempfile
 def check_launch(executable: Path, timeout: float) -> None:
     with tempfile.TemporaryDirectory(prefix="spejl-smoke-") as directory:
         report = Path(directory) / "ready.json"
-        env = dict(os.environ, SPEJL_SMOKE_TEST_REPORT=str(report))
+        env = dict(os.environ, SPEJL_SMOKE_TEST_REPORT=str(report), SPEJL_NO_UPDATE_CHECK="1")
         process = subprocess.Popen([str(executable)], cwd=executable.parent, env=env)
         try:
             try:

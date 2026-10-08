@@ -75,15 +75,10 @@ def test_unreadable_pdf_is_a_problem_not_a_crash(tmp_path):
 
 
 @pytest.fixture
-def qapp(monkeypatch):
+def qapp():
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
-    from spejl.gui.main_window import MainWindow
-
-    # The real update check asks GitHub and can open a modal "update
-    # available" box that nothing in a headless test will ever close.
-    monkeypatch.setattr(MainWindow, "_check_for_updates", lambda self: None)
     return QApplication.instance() or QApplication([])
 
 
