@@ -181,6 +181,12 @@ class PdfPreviewDialog(QDialog):
         self._show_page(0)
 
     def _show_page(self, index: int) -> None:
+        if self.count == 0:
+            self.image.setText("Preview unavailable — this PDF could not be read")
+            self.counter.setText("")
+            self.previous.setEnabled(False)
+            self.next.setEnabled(False)
+            return
         if not 0 <= index < self.count:
             return
         self.index = index

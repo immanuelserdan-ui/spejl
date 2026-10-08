@@ -1230,7 +1230,7 @@ class MainWindow(QMainWindow):
         elif entry.output is not None:
             self._set_status_with_overlap("Plan ready for review.")
         self._sync_preview_scale()
-        if pixmap is None:
+        if pixmap is None and entry.blocking_problem is None:
             self._status_label.setText("Could not preview this file — mirroring may still work.")
 
     def _update_review_picture_button(self, entry: BatchEntry | None) -> None:
