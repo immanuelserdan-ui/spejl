@@ -115,6 +115,8 @@ QPushButton#verifyButton:hover:!disabled {{ background: #14364C; }}
 
 
 _PROBLEM_COLOR = QColor("#FFB74D")
+# Image exports render the sheet at this resolution and say so in the file.
+_EXPORT_DPI = 300
 
 
 def _failure_summary(failed: list[BatchEntry]) -> str:
@@ -1647,9 +1649,12 @@ class MainWindow(QMainWindow):
                         while destination.exists():
                             destination = directory / f"{base}_{counter}.jpg"
                             counter += 1
-                        pixmap = page.get_pixmap(dpi=300, alpha=False)
+                        pixmap = page.get_pixmap(dpi=_EXPORT_DPI, alpha=False)
                         image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-                        image.save(destination, format="JPEG", quality=95, subsampling=0)
+                        # The DPI tag makes Revit/AutoCAD place the image at the
+                        # sheet's true size instead of guessing 72/96 dpi.
+                        image.save(destination, format="JPEG", quality=95, subsampling=0,
+                                   dpi=(_EXPORT_DPI, _EXPORT_DPI))
                         exported.append(destination)
             except Exception as exc:
                 errors.append(f"{kind.title()} {entry.display_name or source.name}: {exc}")
@@ -1662,21 +1667,20 @@ class MainWindow(QMainWindow):
         suffix = destination.suffix.lower().lstrip(".")
         image_format = {"jpg": "jpeg", "jpeg": "jpeg", "tif": "tiff", "tiff": "tiff"}.get(suffix, suffix)
         if self._output_path.suffix.lower() == ".pdf":
-            import cv2
-            import numpy as np
             import pymupdf
+            from PIL import Image
 
             document = pymupdf.open(str(self._output_path))
             try:
                 page_index = min(self._document_session.page_index, document.page_count - 1)
-                pixmap = document[page_index].get_pixmap(dpi=300, alpha=False)
-                image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(
-                    pixmap.height, pixmap.width, pixmap.n
-                )
-                # PyMuPDF supplies RGB samples; OpenCV writers expect BGR.
-                image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
-                if not cv2.imwrite(str(destination), image):
-                    raise ValueError(f"Could not write {image_format.upper()} image export.")
+                pixmap = document[page_index].get_pixmap(dpi=_EXPORT_DPI, alpha=False)
+                image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
+                options = {"quality": 95, "subsampling": 0} if image_format == "jpeg" else {}
+                try:
+                    image.save(destination, format=image_format.upper(),
+                               dpi=(_EXPORT_DPI, _EXPORT_DPI), **options)
+                except (KeyError, OSError, ValueError) as exc:
+                    raise ValueError(f"Could not write {image_format.upper()} image export.") from exc
             finally:
                 document.close()
             return
