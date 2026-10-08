@@ -28,8 +28,45 @@ The installer supplies shortcuts, an Apps entry, and an uninstaller. It does
 not bundle user drawings, development environments, or build logs. App-local
 Microsoft runtime DLLs come from the PySide6 wheel. Dependencies' license
 notices accompany the installed app. Code signing requires the distributor's
-own certificate; this build is unsigned.
+own certificate; see "Code signing" below.
 
 Compiler: https://jrsoftware.org/isdl.php
 Portable compiler setup: https://jrsoftware.org/ishelp/topic_technotes.htm
 App-local runtime deployment: https://learn.microsoft.com/en-us/cpp/windows/deployment-in-visual-cpp
+
+## Code signing
+
+The release workflow (`.github/workflows/release.yml`) signs `Spejl.exe` (before
+the self-test and launch check, so the signed program is what gets tested) and
+the `Setup.exe` installer, then prints who signed each file. It picks the method
+from the repository's settings (**Settings → Secrets and variables → Actions**);
+with neither configured, releases stay unsigned exactly as before.
+
+**Option A — a certificate file (.pfx).** For a certificate from the company's
+own certificate authority (trusted on company PCs only) or any exportable
+code-signing certificate.
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `SIGNING_CERT_PFX_BASE64` | The .pfx file as Base64: `[Convert]::ToBase64String([IO.File]::ReadAllBytes("cert.pfx"))` |
+| Secret | `SIGNING_CERT_PASSWORD` | The .pfx password |
+| Variable (optional) | `SIGNING_TIMESTAMP_URL` | Timestamp server; defaults to `http://timestamp.digicert.com` |
+
+`tools/sign_windows.ps1` does the signing and also works by hand on a PC.
+
+**Option B — Azure Artifact Signing** (formerly Trusted Signing; publicly
+trusted, about USD 10/month). Create a Signing Account and a Certificate Profile
+in Azure, and an app registration with the *Artifact Signing Certificate Profile
+Signer* role on the profile.
+
+| Kind | Name | Value |
+|---|---|---|
+| Secret | `AZURE_TENANT_ID` | Directory (tenant) ID of the app registration |
+| Secret | `AZURE_CLIENT_ID` | Application (client) ID |
+| Secret | `AZURE_CLIENT_SECRET` | A client secret of the app registration |
+| Variable | `AZURE_SIGNING_ENDPOINT` | The account's region endpoint, e.g. `https://weu.codesigning.azure.net/` |
+| Variable | `AZURE_SIGNING_ACCOUNT` | Signing Account name |
+| Variable | `AZURE_SIGNING_PROFILE` | Certificate Profile name |
+
+If both are configured, Option A is used. The uninstaller Inno Setup writes
+(`unins000.exe`) is not signed.
