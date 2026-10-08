@@ -52,7 +52,28 @@ def run_embedded(parent_hwnd: int) -> int:
     style = user32.GetWindowLongPtrW(child_hwnd, gwl_style)
     user32.SetWindowLongPtrW(child_hwnd, gwl_style, (style | ws_child) & ~(ws_popup | ws_chrome))
     user32.SetWindowPos(child_hwnd, None, 0, 0, 1, 1, swp_framechanged | swp_nozorder)
+    _quit_when_host_closes(app, user32, parent_hwnd)
     return app.exec()
+
+
+_HOST_CHECK_MS = 1000
+
+
+def _quit_when_host_closes(app: QApplication, user32, parent_hwnd: int) -> QTimer:
+    """Exit once OmniBIM's host window is gone.
+
+    Windows destroys the reparented editor window together with its host, but
+    Qt gets no close event for that, so Spejl.exe used to keep running with no
+    window -- holding Spejl.exe and its DLLs open, which made the next
+    installer fail with "DeleteFile failed; code 5".
+    """
+    user32.IsWindow.argtypes = [ctypes.c_void_p]
+    user32.IsWindow.restype = ctypes.c_int
+    timer = QTimer(app)
+    timer.setInterval(_HOST_CHECK_MS)
+    timer.timeout.connect(lambda: None if user32.IsWindow(parent_hwnd) else app.quit())
+    timer.start()
+    return timer
 
 
 def main() -> int:
