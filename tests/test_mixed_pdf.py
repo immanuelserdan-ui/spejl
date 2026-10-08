@@ -172,13 +172,10 @@ def test_overlap_check_reads_picture_ink_not_its_rectangle(mixed, tmp_path):
 
 
 @pytest.fixture
-def qapp(monkeypatch):
+def qapp():
     pytest.importorskip("PySide6")
     from PySide6.QtWidgets import QApplication
 
-    from spejl.gui.main_window import MainWindow
-
-    monkeypatch.setattr(MainWindow, "_check_for_updates", lambda self: None)
     return QApplication.instance() or QApplication([])
 
 

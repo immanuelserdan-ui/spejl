@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import tempfile
 from uuid import uuid4
 from pathlib import Path
@@ -39,7 +40,7 @@ from spejl.gui.batch_dialogs import JpegExportDialog, MirrorSelectionDialog, Pdf
 from spejl.gui.document_session import DocumentSession
 from spejl.gui.job_controller import MirrorJobController
 from spejl.gui.review_model import summarize_document, summarize_verification
-from spejl.gui.update_checker import UpdateCheckWorker, UpdateInfo
+from spejl.gui.update_checker import UPDATE_CHECK_OPT_OUT, UpdateCheckWorker, UpdateInfo
 from spejl.gui.widgets import DropZone, ScaledImageLabel, SUPPORTED_SUFFIXES
 from spejl.gui.picture_review import PictureTextDialog
 from spejl.gui.worker import MirrorWorker, PictureScanWorker, VerifyWorker
@@ -212,7 +213,9 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
 
     def _check_for_updates(self) -> None:
-        if self._update_thread is not None:
+        # Set by the test suite and the packaged smoke test: an "update
+        # available" box is modal, and nothing closes it in a headless run.
+        if self._update_thread is not None or os.environ.get(UPDATE_CHECK_OPT_OUT) == "1":
             return
         self._update_thread = QThread(self)
         self._update_worker = UpdateCheckWorker()
