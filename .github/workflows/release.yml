@@ -33,48 +33,8 @@ jobs:
           Set-Content -Path spejl\_build_version.py -Value "__version__ = '$env:APP_VERSION'" -Encoding utf8
           python -m PyInstaller spejl.spec --noconfirm --clean --workpath build-installer --distpath dist-installer
 
-      # Code signing switches itself on when its secrets exist; until then the
-      # release stays unsigned. See installer/README.md "Code signing".
-      - name: Choose code signing
-        id: signing
-        shell: pwsh
-        env:
-          HAS_PFX: ${{ secrets.SIGNING_CERT_PFX_BASE64 != '' }}
-          HAS_AZURE: ${{ secrets.AZURE_CLIENT_SECRET != '' && vars.AZURE_SIGNING_ENDPOINT != '' }}
-        run: |
-          $method = if ($env:HAS_PFX -eq 'true') { "pfx" } elseif ($env:HAS_AZURE -eq 'true') { "azure" } else { "none" }
-          "method=$method" >> $env:GITHUB_OUTPUT
-          if ($method -eq "none") { Write-Host "::notice::No signing secrets configured; this release is unsigned." }
-          else { Write-Host "Signing with: $method" }
-
-      - name: Sign app (certificate file)
-        if: steps.signing.outputs.method == 'pfx'
-        shell: pwsh
-        env:
-          SIGNING_CERT_PFX_BASE64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
-          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
-          SIGNING_TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
-        run: ./tools/sign_windows.ps1 dist-installer\Spejl\Spejl.exe
-
-      - name: Sign app (Azure Artifact Signing)
-        if: steps.signing.outputs.method == 'azure'
-        uses: azure/artifact-signing-action@v2.0.0
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\dist-installer\Spejl\Spejl.exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: Spejl
-
       # The build leaves out libraries Spejl never loads (see spejl.spec). Prove
-      # the frozen (and, when configured, signed) app still works before anything
-      # is published.
+      # the frozen app still works before anything is published.
       - name: Self-test the frozen app
         shell: pwsh
         run: |
@@ -102,41 +62,6 @@ jobs:
             "/DPayloadDir=$PWD\installer\payload" `
             "/DReleaseDir=$PWD\release" `
             installer\Spejl.iss
-
-      - name: Sign installer (certificate file)
-        if: steps.signing.outputs.method == 'pfx'
-        shell: pwsh
-        env:
-          SIGNING_CERT_PFX_BASE64: ${{ secrets.SIGNING_CERT_PFX_BASE64 }}
-          SIGNING_CERT_PASSWORD: ${{ secrets.SIGNING_CERT_PASSWORD }}
-          SIGNING_TIMESTAMP_URL: ${{ vars.SIGNING_TIMESTAMP_URL }}
-        run: ./tools/sign_windows.ps1 (Get-ChildItem release\*.exe).FullName
-
-      - name: Sign installer (Azure Artifact Signing)
-        if: steps.signing.outputs.method == 'azure'
-        uses: azure/artifact-signing-action@v2.0.0
-        with:
-          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
-          endpoint: ${{ vars.AZURE_SIGNING_ENDPOINT }}
-          signing-account-name: ${{ vars.AZURE_SIGNING_ACCOUNT }}
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files-folder: ${{ github.workspace }}\release
-          files-folder-filter: exe
-          file-digest: SHA256
-          timestamp-rfc3161: http://timestamp.acs.microsoft.com
-          timestamp-digest: SHA256
-          description: Spejl
-
-      - name: Report signatures
-        shell: pwsh
-        run: |
-          foreach ($file in @("dist-installer\Spejl\Spejl.exe") + (Get-ChildItem release\*.exe).FullName) {
-            $signature = Get-AuthenticodeSignature $file
-            $signer = if ($signature.SignerCertificate) { $signature.SignerCertificate.Subject } else { "unsigned" }
-            Write-Host "$(Split-Path $file -Leaf): $signer ($($signature.Status))"
-          }
 
       - name: Publish GitHub Release
         uses: softprops/action-gh-release@v3
