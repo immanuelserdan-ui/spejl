@@ -5,10 +5,12 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import re
+import logging
+from time import sleep
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-from PySide6.QtCore import QObject, Signal, Slot
+from PySide6.QtCore import QObject, QThread, Signal, Slot
 
 from spejl import __version__
 
@@ -56,7 +58,7 @@ def fetch_update() -> UpdateInfo | None:
         RELEASES_URL,
         headers={"Accept": "application/vnd.github+json", "User-Agent": "Spejl-updater"},
     )
-    with urlopen(request, timeout=5) as response:  # noqa: S310 - fixed GitHub endpoint
+    with urlopen(request, timeout=10) as response:  # noqa: S310 - fixed GitHub endpoint
         payload = json.loads(response.read().decode("utf-8"))
     return find_update(payload)
 
@@ -66,9 +68,17 @@ class UpdateCheckWorker(QObject):
 
     @Slot()
     def run(self) -> None:
-        try:
-            self.finished.emit(fetch_update())
-        except (OSError, URLError, ValueError, KeyError, TypeError):
-            # Update checks are best-effort and must never prevent the app
-            # from opening or expose a network error to ordinary users.
-            self.finished.emit(None)
+        # Retry transient startup/network failures off the GUI thread.
+        for attempt in range(3):
+            if QThread.currentThread().isInterruptionRequested():
+                break
+            try:
+                self.finished.emit(fetch_update())
+                return
+            except (OSError, URLError, ValueError, KeyError, TypeError) as error:
+                logging.getLogger(__name__).warning(
+                    "Spejl update check attempt %s failed: %s", attempt + 1, error
+                )
+                if attempt < 2:
+                    sleep(2 ** attempt)
+        self.finished.emit(None)
