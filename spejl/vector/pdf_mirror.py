@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 # would be free to drift, and it is the rule the whole tool turns on.
 _mirror_point = M.mirror_point
 
-_MIN_PAGE_CONTENT_MARGIN_PT = 5.0
-
 # Font-family fallback: CAD-exported PDFs overwhelmingly set a
 # Helvetica/Arial-alike, so that is the default; a document that
 # clearly asks for a serif or monospace face gets one. Exact family
@@ -64,7 +62,6 @@ def mirror_pdf(
     output.
     """
     result = Document(source=input_path, output=output_path, axis=axis, route=Route.VECTOR)
-    fitted_pages: set[int] = set()
 
     src = pymupdf.open(str(input_path))
     pike_src = pikepdf.Pdf.open(str(input_path))
@@ -123,12 +120,9 @@ def mirror_pdf(
                 _pdf_reflection_matrix(pike_src.pages[page_index], axis),
             )
 
-            if _expand_page_for_content(
-                new_page, include_images=not pictures_as_linework,
-            ):
-                fitted_pages.add(page_index)
-            W, H = new_page.rect.width, new_page.rect.height
-
+            # Preserve the source paper and clipping exactly. Bounds reported
+            # for strokes can extend outside the visible sheet; that is not
+            # a reason to resize the drawing or add white paper to the mirror.
             result.pages.append(
                 PageResult(
                     index=page_index,
@@ -158,22 +152,6 @@ def mirror_pdf(
                     )
                 if not _pixmap_has_ink(pix):
                     blank_pages.append(page_index)
-                if page_index in fitted_pages:
-                    bounds = _page_visible_content_bounds(
-                        written_page, include_images=not pictures_as_linework
-                    )
-                    margin = _MIN_PAGE_CONTENT_MARGIN_PT
-                    tolerance = 0.1
-                    if bounds is not None and (
-                        bounds.x0 < margin - tolerance
-                        or bounds.y0 < margin - tolerance
-                        or bounds.x1 > written_page.cropbox.width - margin + tolerance
-                        or bounds.y1 > written_page.cropbox.height - margin + tolerance
-                    ):
-                        raise VectorTextTransformError(
-                            f"Expanded page {page_index + 1} still has content inside the "
-                            f"{margin:g}-point safety margin."
-                        )
         if blank_pages:
             # A few CAD exporters produce a page whose resource graph cannot
             # survive stream replacement even though text extraction works.
@@ -187,70 +165,6 @@ def mirror_pdf(
         pike_src.close()
 
     return result
-
-
-def _page_visible_content_bounds(
-    page: pymupdf.Page, *, include_images: bool = True
-) -> pymupdf.Rect | None:
-    """Union visible PDF object bounds, including strokes and text glyphs.
-
-    A raster export's picture usually spans the whole sheet, paper margins
-    included; ``include_images=False`` measures only the vector content so
-    such a page is not shrunk to fit its own white border.
-    """
-    bounds: pymupdf.Rect | None = None
-    for kind, bbox in page.get_bboxlog():
-        if kind.startswith("clip-") or kind == "group":
-            continue
-        if not include_images and kind.startswith("fill-im"):
-            continue
-        rect = pymupdf.Rect(bbox)
-        if rect.is_empty or not rect.is_valid:
-            continue
-        if bounds is None:
-            bounds = rect
-        else:
-            bounds.include_rect(rect)
-    return bounds
-
-
-def _expand_page_for_content(
-    page: pymupdf.Page,
-    *,
-    margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
-    include_images: bool = True,
-) -> bool:
-    """Add paper around overflowing graphics without changing their scale.
-
-    Keep the existing crop when nothing crosses it. For overflow, extend
-    the page to include the old sheet and the content plus a safety margin.
-    The content stream (including clipping paths) stays byte-for-byte intact.
-    PDF boxes use PDF user space, not PyMuPDF's top-left page coordinates.
-    """
-    rotation = page.rotation
-    page.set_rotation(0)
-    try:
-        bounds = _page_visible_content_bounds(page, include_images=include_images)
-        if bounds is None:
-            return False
-        sheet = page.rect
-        tolerance = 0.05
-        if (bounds.x0 >= -tolerance and bounds.y0 >= -tolerance
-                and bounds.x1 <= sheet.width + tolerance
-                and bounds.y1 <= sheet.height + tolerance):
-            return False
-        expanded = pymupdf.Rect(
-            min(0, bounds.x0 - margin), min(0, bounds.y0 - margin),
-            max(sheet.width, bounds.x1 + margin),
-            max(sheet.height, bounds.y1 + margin),
-        )
-        media = expanded * ~page.transformation_matrix
-        # set_mediabox also clears the old crop/trim boxes, making the new
-        # paper visible without inserting any scaling or translation matrix.
-        page.set_mediabox(media)
-        return True
-    finally:
-        page.set_rotation(rotation)
 
 
 def remove_pdf_text_runs(
