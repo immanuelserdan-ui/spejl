@@ -123,14 +123,11 @@ def mirror_pdf(
                 _pdf_reflection_matrix(pike_src.pages[page_index], axis),
             )
 
-            fitted_stream, did_fit = _fit_page_content_stream(
-                new_page, transformed, width=W, height=H,
-                include_images=not pictures_as_linework,
-            )
-            if did_fit:
-                out.update_stream(xref, fitted_stream)
-                new_page.set_contents(xref)
+            if _expand_page_for_content(
+                new_page, include_images=not pictures_as_linework,
+            ):
                 fitted_pages.add(page_index)
+            W, H = new_page.rect.width, new_page.rect.height
 
             result.pages.append(
                 PageResult(
@@ -170,11 +167,11 @@ def mirror_pdf(
                     if bounds is not None and (
                         bounds.x0 < margin - tolerance
                         or bounds.y0 < margin - tolerance
-                        or bounds.x1 > written_page.rect.width - margin + tolerance
-                        or bounds.y1 > written_page.rect.height - margin + tolerance
+                        or bounds.x1 > written_page.cropbox.width - margin + tolerance
+                        or bounds.y1 > written_page.cropbox.height - margin + tolerance
                     ):
                         raise VectorTextTransformError(
-                            f"Fitted page {page_index + 1} still has content inside the "
+                            f"Expanded page {page_index + 1} still has content inside the "
                             f"{margin:g}-point safety margin."
                         )
         if blank_pages:
@@ -217,59 +214,43 @@ def _page_visible_content_bounds(
     return bounds
 
 
-def _fit_page_content_stream(
+def _expand_page_for_content(
     page: pymupdf.Page,
-    content: bytes,
     *,
-    width: float,
-    height: float,
     margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
     include_images: bool = True,
-) -> tuple[bytes, bool]:
-    """Bring page graphics back on the sheet, only if any would be cut off.
+) -> bool:
+    """Add paper around overflowing graphics without changing their scale.
 
-    Plans are scaled drawings, so the mirror stays exactly 1:1 whenever all
-    content is on the page — even content within ``margin`` of the edge:
-    reflection keeps every edge distance, so the mirror is no closer to the
-    edge than the source already was. Only content crossing the page edge
-    triggers a uniform fit to ``margin``, which keeps walls, door swings,
-    dimensions and text aligned. Rotated PDF pages use a different default
-    user-space basis, so they are left untouched rather than risk a bad CTM.
+    Keep the existing crop when nothing crosses it. For overflow, extend
+    the page to include the old sheet and the content plus a safety margin.
+    The content stream (including clipping paths) stays byte-for-byte intact.
+    PDF boxes use PDF user space, not PyMuPDF's top-left page coordinates.
     """
-    if page.rotation or width <= 2 * margin or height <= 2 * margin:
-        return content, False
-    bounds = _page_visible_content_bounds(page, include_images=include_images)
-    if bounds is None:
-        return content, False
-    safe = pymupdf.Rect(margin, margin, width - margin, height - margin)
-    tolerance = 0.05
-    if (
-        bounds.x0 >= -tolerance
-        and bounds.y0 >= -tolerance
-        and bounds.x1 <= width + tolerance
-        and bounds.y1 <= height + tolerance
-    ):
-        return content, False
-
-    scale = min(
-        1.0,
-        safe.width / max(bounds.width, 1e-6),
-        safe.height / max(bounds.height, 1e-6),
-    )
-    dx = safe.x0 + (safe.width - bounds.width * scale) / 2 - bounds.x0 * scale
-    dy = safe.y0 + (safe.height - bounds.height * scale) / 2 - bounds.y0 * scale
-    # The fit above is in PyMuPDF's top-left page coordinates, but ``cm``
-    # acts in PDF user space, whose origin is wherever the MediaBox puts it
-    # (Revit/Adobe exports often centre it on the sheet). Conjugate the fit
-    # by the page's user-space-to-page matrix so it lands where it was
-    # measured for any MediaBox origin.
-    to_page = page.transformation_matrix
-    fit = pymupdf.Matrix(scale, 0, 0, scale, dx, dy)
-    cm = to_page * fit * ~to_page
-    matrix = (
-        f"q\n{cm.a:.10f} {cm.b:.10f} {cm.c:.10f} {cm.d:.10f} {cm.e:.10f} {cm.f:.10f} cm\n"
-    ).encode("ascii")
-    return matrix + content + b"\nQ\n", True
+    rotation = page.rotation
+    page.set_rotation(0)
+    try:
+        bounds = _page_visible_content_bounds(page, include_images=include_images)
+        if bounds is None:
+            return False
+        sheet = page.rect
+        tolerance = 0.05
+        if (bounds.x0 >= -tolerance and bounds.y0 >= -tolerance
+                and bounds.x1 <= sheet.width + tolerance
+                and bounds.y1 <= sheet.height + tolerance):
+            return False
+        expanded = pymupdf.Rect(
+            min(0, bounds.x0 - margin), min(0, bounds.y0 - margin),
+            max(sheet.width, bounds.x1 + margin),
+            max(sheet.height, bounds.y1 + margin),
+        )
+        media = expanded * ~page.transformation_matrix
+        # set_mediabox also clears the old crop/trim boxes, making the new
+        # paper visible without inserting any scaling or translation matrix.
+        page.set_mediabox(media)
+        return True
+    finally:
+        page.set_rotation(rotation)
 
 
 def remove_pdf_text_runs(

@@ -359,7 +359,8 @@ def test_text_drawing_overlap_findings_name_only_colliding_text(tmp_path: Path):
     ]
 
 
-def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Path):
+@pytest.mark.parametrize("axis", list(Axis))
+def test_overflow_expands_paper_without_scaling(tmp_path: Path, axis):
     source = tmp_path / "edge-plan.pdf"
     output = tmp_path / "edge-plan-mirrored.pdf"
     doc = pymupdf.open()
@@ -379,7 +380,7 @@ def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Pa
     doc.save(source)
     doc.close()
 
-    mirror_pdf(source, output, axis=Axis.VERTICAL)
+    result = mirror_pdf(source, output, axis=axis)
     with pymupdf.open(output) as mirrored:
         page = mirrored[0]
         bounds = None
@@ -396,7 +397,15 @@ def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Pa
         assert bounds.y0 >= 5.0 - 0.1
         assert bounds.x1 <= page.rect.width - 5.0 + 0.1
         assert bounds.y1 <= page.rect.height - 5.0 + 0.1
-        assert (page.rect.width, page.rect.height) == pytest.approx((200, 200))
+        assert page.rect.width > 200
+        assert result.pages[0].width == pytest.approx(page.rect.width)
+        assert result.pages[0].height == pytest.approx(page.rect.height)
+        with pymupdf.open(source) as original:
+            for before, after in zip(original[0].get_drawings(), page.get_drawings()):
+                assert after['rect'].width == pytest.approx(before['rect'].width, abs=0.001)
+                assert after['rect'].height == pytest.approx(before['rect'].height, abs=0.001)
+                assert after['width'] == pytest.approx(before['width'], abs=0.001)
+            assert page.get_texttrace()[0]['size'] == pytest.approx(original[0].get_texttrace()[0]['size'], abs=0.001)
         assert "Entry" in page.get_text()
         assert page.get_drawings()
 
@@ -501,3 +510,31 @@ def test_content_near_the_edge_stays_exactly_one_to_one(tmp_path: Path):
         assert len(got) == len(want)
         for w, g in zip(want, got):
             assert tuple(g) == pytest.approx(tuple(w), abs=1e-3)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("cropped", [False, True])
+def test_page_expansion_preserves_stream_and_geometry(tmp_path, rotation, cropped):
+    from spejl.vector.pdf_mirror import _expand_page_for_content
+    doc = pymupdf.open()
+    page = doc.new_page(width=240, height=160)
+    page.draw_rect(pymupdf.Rect(-3, 10, 238, 150), width=2)
+    page.insert_text((30, 70), "Scale 1:100", fontsize=12)
+    if cropped:
+        page.set_cropbox(pymupdf.Rect(10, 5, 230, 155))
+    page.set_rotation(rotation)
+    before = page.get_drawings()[0]
+    stream = page.read_contents()
+    assert _expand_page_for_content(page)
+    assert page.rotation == rotation
+    assert page.read_contents() == stream
+    after = page.get_drawings()[0]
+    assert after['rect'].width == pytest.approx(before['rect'].width)
+    assert after['rect'].height == pytest.approx(before['rect'].height)
+    assert after['width'] == before['width']
+    assert page.get_texttrace()[0]['size'] == pytest.approx(12)
+    # A second pass must not keep growing the sheet.
+    box = tuple(page.mediabox)
+    assert not _expand_page_for_content(page)
+    assert tuple(page.mediabox) == box
+    doc.close()
