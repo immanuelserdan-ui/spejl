@@ -164,6 +164,13 @@ class MainWindow(QMainWindow):
         self._document_session = DocumentSession()
         self._update_thread: QThread | None = None
         self._update_worker: UpdateCheckWorker | None = None
+        self._update_notification_started = False
+        self._closing = False
+        self._pending_update: UpdateInfo | None = None
+        self._update_dialog: QMessageBox | None = None
+        self._update_notice_timer = QTimer(self)
+        self._update_notice_timer.setInterval(1000)
+        self._update_notice_timer.timeout.connect(self._show_update_notice)
         self._picture_scan_worker: PictureScanWorker | None = None
         # Mirror Plan reviews picture-drawn plans first, one after another.
         self._review_queue: list[Path] = []
@@ -204,8 +211,6 @@ class MainWindow(QMainWindow):
         root.addWidget(self._build_preview_area(), stretch=1)
         outer.addWidget(content, stretch=1)
         self._install_shortcuts()
-        if not embedded:
-            QTimer.singleShot(1500, self._check_for_updates)
 
     def _install_shortcuts(self) -> None:
         """Discoverable desktop conventions; each delegates to existing UI actions."""
@@ -215,6 +220,19 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_mirrored_view)
         if not self._embedded:
             QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
+
+    def start_update_notifications(self) -> None:
+        """Called by the launcher only after the splash has fully closed.
+
+        No dismissal preference is saved: every launch checks again until
+        the installed version matches or exceeds the published version.
+        """
+        if (self._embedded or self._update_notification_started
+                or not self.isVisible()
+                or os.environ.get(UPDATE_CHECK_OPT_OUT) == "1"):
+            return
+        self._update_notification_started = True
+        self._check_for_updates()
 
     def _check_for_updates(self) -> None:
         # Set by the test suite and the packaged smoke test: an "update
@@ -231,20 +249,58 @@ class MainWindow(QMainWindow):
         self._update_thread.start()
 
     def _on_update_result(self, info: UpdateInfo | None) -> None:
-        if info is None:
+        if info is None or self._closing:
             return
+        self._pending_update = info
+        self._show_update_notice()
+
+    def _show_update_notice(self) -> None:
+        if self._pending_update is None or self._update_dialog is not None:
+            self._update_notice_timer.stop()
+            return
+        # If startup was minimized, keep the notice pending until the user
+        # can see its parent; never open a dialog behind an invisible window.
+        if not self.isVisible() or self.isMinimized():
+            self._update_notice_timer.start()
+            return
+        self._update_notice_timer.stop()
+        info = self._pending_update
+        self._pending_update = None
         box = QMessageBox(self)
-        box.setWindowTitle("Spejl update available")
-        box.setText(f"Spejl {info.version} is ready to install.")
-        box.setInformativeText(
-            "Download the installer to update Spejl. Your floor-plan files are not affected."
+        self._update_dialog = box
+        box.setStyleSheet(
+            "QMessageBox { background: #0B1F2E; } "
+            "QLabel { color: #F3F8FB; font: 10pt 'Segoe UI'; } "
+            "QPushButton { color: #F3F8FB; background: #123044; border: 1px solid #37D5FF; "
+            "border-radius: 5px; padding: 8px 16px; font: 10pt 'Segoe UI'; } "
+            "QPushButton:default { background: #37D5FF; color: #07131F; } "
+            "QPushButton:hover { background: #1D5267; }"
         )
-        open_button = box.addButton("Open download page", QMessageBox.ButtonRole.AcceptRole)
+        box.setWindowTitle("Spejl update available")
+        box.setIcon(QMessageBox.Icon.Information)
+        box.setWindowModality(Qt.WindowModality.WindowModal)
+        box.setText(f"Spejl {info.version} is available. Please update Spejl.")
+        box.setInformativeText(
+            "Download and run the new installer. This reminder appears every time "
+            "you open Spejl until you install the update."
+        )
+        download = box.addButton("Download update", QMessageBox.ButtonRole.AcceptRole)
         box.addButton("Later", QMessageBox.ButtonRole.RejectRole)
-        box.exec()
-        if box.clickedButton() is open_button:
-            target = info.download_url or info.release_url
-            QDesktopServices.openUrl(QUrl(target))
+        box.setDefaultButton(download)
+
+        def finished(_result: int) -> None:
+            if box.clickedButton() is download:
+                QDesktopServices.openUrl(QUrl(info.download_url or info.release_url))
+            self._update_dialog = None
+            box.deleteLater()
+
+        box.finished.connect(finished)
+        # A non-blocking modal dialog lets worker cleanup finish normally.
+        box.show()
+        box.adjustSize()
+        box.move(box.pos() + self.frameGeometry().center() - box.frameGeometry().center())
+        box.raise_()
+        box.activateWindow()
 
     def _finish_update_check(self) -> None:
         if self._update_thread is not None:
@@ -2024,6 +2080,16 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Couldn't move text", str(exc))
 
     def closeEvent(self, event) -> None:  # noqa: N802 (Qt override)
+        self._closing = True
+        self._update_notice_timer.stop()
+        self._pending_update = None
+        if self._update_thread is not None:
+            self._update_thread.requestInterruption()
+            self._update_thread.quit()
+            # urlopen is bounded to 10 s; interruption prevents another try.
+            self._update_thread.wait(13000)
+        if self._update_dialog is not None:
+            self._update_dialog.close()
         if self._worker is not None and self._worker.isRunning():
             self._worker.wait(2000)
         if self._verify_worker is not None and self._verify_worker.isRunning():

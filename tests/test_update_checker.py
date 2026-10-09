@@ -63,3 +63,86 @@ def test_window_skips_the_update_check_when_opted_out(monkeypatch):
         assert calls
     finally:
         window.close()
+
+
+import pytest
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QMessageBox
+from spejl.gui.main_window import MainWindow
+from spejl.gui.update_checker import UpdateInfo, UpdateCheckWorker
+
+
+def test_notifications_start_only_after_window_is_ready(qtbot, monkeypatch):
+    monkeypatch.delenv("SPEJL_NO_UPDATE_CHECK", raising=False)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    calls = []
+    monkeypatch.setattr(window, "_check_for_updates", lambda: calls.append(1))
+    qtbot.wait(1600)
+    assert calls == []  # Old code checked while the splash covered the window.
+    window.start_update_notifications()
+    assert calls == []
+    window.show()
+    window.start_update_notifications()
+    window.start_update_notifications()
+    assert calls == [1]
+
+
+def test_centered_notice_reappears_on_next_launch(qtbot, monkeypatch):
+    from spejl.gui import main_window
+    downloads = []
+    monkeypatch.setattr(main_window.QDesktopServices, "openUrl", lambda url: downloads.append(url.toString()))
+    info = UpdateInfo("0.1.99", "https://github.com/immanuelserdan-ui/spejl/releases", "https://github.com/immanuelserdan-ui/spejl/setup.exe")
+    for launch in range(2):
+        window = MainWindow()
+        qtbot.addWidget(window)
+        window.setGeometry(80, 100, 1000, 650)
+        window.show()
+        qtbot.wait(20)
+        window._on_update_result(info)
+        dialog = window._update_dialog
+        assert dialog is not None and dialog.isVisible()
+        assert dialog.windowModality() == Qt.WindowModality.WindowModal
+        assert (dialog.frameGeometry().center() - window.frameGeometry().center()).manhattanLength() <= 2
+        button = next(b for b in dialog.buttons() if b.text() == ("Later" if launch == 0 else "Download update"))
+        qtbot.mouseClick(button, Qt.MouseButton.LeftButton)
+        assert window._update_dialog is None
+        window.close()
+    assert downloads == [info.download_url]
+
+
+def test_update_waits_for_visible_parent(qtbot):
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._on_update_result(UpdateInfo("0.1.99", "https://github.com/immanuelserdan-ui/spejl/releases", None))
+    assert window._update_dialog is None
+    assert window._pending_update is not None
+    window.show()
+    window._show_update_notice()
+    assert window._update_dialog.isVisible()
+    window._update_dialog.reject()
+    window.close()
+
+
+def test_transient_network_failure_is_retried(monkeypatch):
+    from spejl.gui import update_checker
+    calls = []
+    info = UpdateInfo("0.1.99", "https://github.com/immanuelserdan-ui/spejl/releases", None)
+    def fetch():
+        calls.append(1)
+        if len(calls) < 3:
+            raise OSError("Temporary network failure")
+        return info
+    monkeypatch.setattr(update_checker, "fetch_update", fetch)
+    monkeypatch.setattr(update_checker, "sleep", lambda seconds: None)
+    worker = UpdateCheckWorker()
+    results = []
+    worker.finished.connect(results.append)
+    worker.run()
+    assert len(calls) == 3
+    assert results == [info]
+
+
+def test_equal_or_newer_installed_version_is_not_prompted():
+    assert find_update({"tag_name": "v0.1.24"}, "0.1.24") is None
+    assert find_update({"tag_name": "v0.1.24"}, "0.1.25") is None

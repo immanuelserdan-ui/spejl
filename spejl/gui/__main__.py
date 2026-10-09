@@ -113,6 +113,7 @@ def main() -> int:
             splash.close()
             splash.deleteLater()
             app.setQuitOnLastWindowClosed(True)
+            window.start_update_notifications()
             # Confirm the actual main window, not a splash or error dialog.
             report_path = os.environ.get("SPEJL_SMOKE_TEST_REPORT")
             if report_path:
