@@ -31,8 +31,6 @@ if TYPE_CHECKING:
 # would be free to drift, and it is the rule the whole tool turns on.
 _mirror_point = M.mirror_point
 
-_MIN_PAGE_CONTENT_MARGIN_PT = 5.0
-
 # Font-family fallback: CAD-exported PDFs overwhelmingly set a
 # Helvetica/Arial-alike, so that is the default; a document that
 # clearly asks for a serif or monospace face gets one. Exact family
@@ -64,7 +62,6 @@ def mirror_pdf(
     output.
     """
     result = Document(source=input_path, output=output_path, axis=axis, route=Route.VECTOR)
-    fitted_pages: set[int] = set()
 
     src = pymupdf.open(str(input_path))
     pike_src = pikepdf.Pdf.open(str(input_path))
@@ -123,15 +120,9 @@ def mirror_pdf(
                 _pdf_reflection_matrix(pike_src.pages[page_index], axis),
             )
 
-            fitted_stream, did_fit = _fit_page_content_stream(
-                new_page, transformed, width=W, height=H,
-                include_images=not pictures_as_linework,
-            )
-            if did_fit:
-                out.update_stream(xref, fitted_stream)
-                new_page.set_contents(xref)
-                fitted_pages.add(page_index)
-
+            # Preserve the source paper and clipping exactly. Bounds reported
+            # for strokes can extend outside the visible sheet; that is not
+            # a reason to resize the drawing or add white paper to the mirror.
             result.pages.append(
                 PageResult(
                     index=page_index,
@@ -161,22 +152,6 @@ def mirror_pdf(
                     )
                 if not _pixmap_has_ink(pix):
                     blank_pages.append(page_index)
-                if page_index in fitted_pages:
-                    bounds = _page_visible_content_bounds(
-                        written_page, include_images=not pictures_as_linework
-                    )
-                    margin = _MIN_PAGE_CONTENT_MARGIN_PT
-                    tolerance = 0.1
-                    if bounds is not None and (
-                        bounds.x0 < margin - tolerance
-                        or bounds.y0 < margin - tolerance
-                        or bounds.x1 > written_page.rect.width - margin + tolerance
-                        or bounds.y1 > written_page.rect.height - margin + tolerance
-                    ):
-                        raise VectorTextTransformError(
-                            f"Fitted page {page_index + 1} still has content inside the "
-                            f"{margin:g}-point safety margin."
-                        )
         if blank_pages:
             # A few CAD exporters produce a page whose resource graph cannot
             # survive stream replacement even though text extraction works.
@@ -190,86 +165,6 @@ def mirror_pdf(
         pike_src.close()
 
     return result
-
-
-def _page_visible_content_bounds(
-    page: pymupdf.Page, *, include_images: bool = True
-) -> pymupdf.Rect | None:
-    """Union visible PDF object bounds, including strokes and text glyphs.
-
-    A raster export's picture usually spans the whole sheet, paper margins
-    included; ``include_images=False`` measures only the vector content so
-    such a page is not shrunk to fit its own white border.
-    """
-    bounds: pymupdf.Rect | None = None
-    for kind, bbox in page.get_bboxlog():
-        if kind.startswith("clip-") or kind == "group":
-            continue
-        if not include_images and kind.startswith("fill-im"):
-            continue
-        rect = pymupdf.Rect(bbox)
-        if rect.is_empty or not rect.is_valid:
-            continue
-        if bounds is None:
-            bounds = rect
-        else:
-            bounds.include_rect(rect)
-    return bounds
-
-
-def _fit_page_content_stream(
-    page: pymupdf.Page,
-    content: bytes,
-    *,
-    width: float,
-    height: float,
-    margin: float = _MIN_PAGE_CONTENT_MARGIN_PT,
-    include_images: bool = True,
-) -> tuple[bytes, bool]:
-    """Bring page graphics back on the sheet, only if any would be cut off.
-
-    Plans are scaled drawings, so the mirror stays exactly 1:1 whenever all
-    content is on the page — even content within ``margin`` of the edge:
-    reflection keeps every edge distance, so the mirror is no closer to the
-    edge than the source already was. Only content crossing the page edge
-    triggers a uniform fit to ``margin``, which keeps walls, door swings,
-    dimensions and text aligned. Rotated PDF pages use a different default
-    user-space basis, so they are left untouched rather than risk a bad CTM.
-    """
-    if page.rotation or width <= 2 * margin or height <= 2 * margin:
-        return content, False
-    bounds = _page_visible_content_bounds(page, include_images=include_images)
-    if bounds is None:
-        return content, False
-    safe = pymupdf.Rect(margin, margin, width - margin, height - margin)
-    tolerance = 0.05
-    if (
-        bounds.x0 >= -tolerance
-        and bounds.y0 >= -tolerance
-        and bounds.x1 <= width + tolerance
-        and bounds.y1 <= height + tolerance
-    ):
-        return content, False
-
-    scale = min(
-        1.0,
-        safe.width / max(bounds.width, 1e-6),
-        safe.height / max(bounds.height, 1e-6),
-    )
-    dx = safe.x0 + (safe.width - bounds.width * scale) / 2 - bounds.x0 * scale
-    dy = safe.y0 + (safe.height - bounds.height * scale) / 2 - bounds.y0 * scale
-    # The fit above is in PyMuPDF's top-left page coordinates, but ``cm``
-    # acts in PDF user space, whose origin is wherever the MediaBox puts it
-    # (Revit/Adobe exports often centre it on the sheet). Conjugate the fit
-    # by the page's user-space-to-page matrix so it lands where it was
-    # measured for any MediaBox origin.
-    to_page = page.transformation_matrix
-    fit = pymupdf.Matrix(scale, 0, 0, scale, dx, dy)
-    cm = to_page * fit * ~to_page
-    matrix = (
-        f"q\n{cm.a:.10f} {cm.b:.10f} {cm.c:.10f} {cm.d:.10f} {cm.e:.10f} {cm.f:.10f} cm\n"
-    ).encode("ascii")
-    return matrix + content + b"\nQ\n", True
 
 
 def remove_pdf_text_runs(

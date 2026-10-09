@@ -359,7 +359,8 @@ def test_text_drawing_overlap_findings_name_only_colliding_text(tmp_path: Path):
     ]
 
 
-def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Path):
+@pytest.mark.parametrize("axis", list(Axis))
+def test_overflow_preserves_source_paper_and_scale(tmp_path: Path, axis):
     source = tmp_path / "edge-plan.pdf"
     output = tmp_path / "edge-plan-mirrored.pdf"
     doc = pymupdf.open()
@@ -367,8 +368,8 @@ def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Pa
     shape = page.new_shape()
     shape.draw_rect(pymupdf.Rect(20, 20, 205, 180))
     shape.finish(color=(0, 0, 0), width=2)
-    # A door-swing-like curve also extends beyond the sheet edge. Its full
-    # stroke bounds must be kept with the wall when the content is fitted.
+    # A door swing crosses the sheet edge. Preserve its original clipping
+    # instead of adding paper or shrinking the drawing.
     shape.draw_bezier(
         pymupdf.Point(195, 35), pymupdf.Point(215, 35),
         pymupdf.Point(215, 55), pymupdf.Point(195, 55),
@@ -379,24 +380,18 @@ def test_content_touching_page_edge_is_fit_inside_five_point_margin(tmp_path: Pa
     doc.save(source)
     doc.close()
 
-    mirror_pdf(source, output, axis=Axis.VERTICAL)
+    result = mirror_pdf(source, output, axis=axis)
     with pymupdf.open(output) as mirrored:
         page = mirrored[0]
-        bounds = None
-        for kind, bbox in page.get_bboxlog():
-            if kind.startswith("clip-") or kind == "group":
-                continue
-            rect = pymupdf.Rect(bbox)
-            if bounds is None:
-                bounds = rect
-            else:
-                bounds.include_rect(rect)
-        assert bounds is not None
-        assert bounds.x0 >= 5.0 - 0.1
-        assert bounds.y0 >= 5.0 - 0.1
-        assert bounds.x1 <= page.rect.width - 5.0 + 0.1
-        assert bounds.y1 <= page.rect.height - 5.0 + 0.1
         assert (page.rect.width, page.rect.height) == pytest.approx((200, 200))
+        assert result.pages[0].width == pytest.approx(page.rect.width)
+        assert result.pages[0].height == pytest.approx(page.rect.height)
+        with pymupdf.open(source) as original:
+            for before, after in zip(original[0].get_drawings(), page.get_drawings()):
+                assert after['rect'].width == pytest.approx(before['rect'].width, abs=0.001)
+                assert after['rect'].height == pytest.approx(before['rect'].height, abs=0.001)
+                assert after['width'] == pytest.approx(before['width'], abs=0.001)
+            assert page.get_texttrace()[0]['size'] == pytest.approx(original[0].get_texttrace()[0]['size'], abs=0.001)
         assert "Entry" in page.get_text()
         assert page.get_drawings()
 
@@ -433,10 +428,8 @@ def test_rotate_param_reports_the_true_rounding_cost(angle_deg, expected_rotate,
     assert deviation == pytest.approx(expected_deviation, abs=0.1)
 
 
-def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
-    """Revit/Adobe exports often centre user space on the sheet
-    (``/MediaBox [-w/2 -h/2 w/2 h/2]``). The fit ``cm`` must be built in
-    that user space, not assume a bottom-left origin."""
+def test_mirror_preserves_centred_mediabox_origin(tmp_path: Path):
+    """Keep centred CAD page boxes and geometry at their original size."""
     import pikepdf
 
     source = tmp_path / "centred-origin.pdf"
@@ -445,8 +438,7 @@ def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
     font = pdf.make_indirect(pikepdf.Dictionary(
         Type=pikepdf.Name.Font, Subtype=pikepdf.Name.Type1, BaseFont=pikepdf.Name.Helvetica,
     ))
-    # The wall runs off the sheet's left edge, so the fit has to scale it
-    # down as well as translate it -- the case a wrong origin breaks.
+    # A wall crossing the page edge must keep the source scale and crop.
     content = (
         b"0 0 0 RG 2 w\n-102 -99 m -102 99 l 99 99 l 99 -99 l h S\n"
         b"BT /F1 12 Tf 1 0 0 1 -40 0 Tm (Stue) Tj ET\n"
@@ -461,20 +453,12 @@ def test_fit_respects_centred_mediabox_origin(tmp_path: Path):
     mirror_pdf(source, output, axis=Axis.VERTICAL)
     with pymupdf.open(output) as mirrored:
         page = mirrored[0]
-        bounds = None
-        for kind, bbox in page.get_bboxlog():
-            if kind.startswith("clip-") or kind == "group":
-                continue
-            rect = pymupdf.Rect(bbox)
-            if bounds is None:
-                bounds = rect
-            else:
-                bounds.include_rect(rect)
-        assert bounds is not None
-        assert bounds.x0 >= 5.0 - 0.1
-        assert bounds.y0 >= 5.0 - 0.1
-        assert bounds.x1 <= page.rect.width - 5.0 + 0.1
-        assert bounds.y1 <= page.rect.height - 5.0 + 0.1
+        with pymupdf.open(source) as original:
+            assert page.mediabox == original[0].mediabox
+            assert page.cropbox == original[0].cropbox
+            assert page.get_drawings()[0]['rect'].width == pytest.approx(
+                original[0].get_drawings()[0]['rect'].width)
+            assert page.get_texttrace()[0]['size'] == pytest.approx(12)
 
 
 def test_content_near_the_edge_stays_exactly_one_to_one(tmp_path: Path):
@@ -501,3 +485,60 @@ def test_content_near_the_edge_stays_exactly_one_to_one(tmp_path: Path):
         assert len(got) == len(want)
         for w, g in zip(want, got):
             assert tuple(g) == pytest.approx(tuple(w), abs=1e-3)
+
+
+@pytest.mark.parametrize("rotation", [0, 90, 180, 270])
+@pytest.mark.parametrize("cropped", [False, True])
+def test_mirror_keeps_source_boxes_and_render_dimensions(tmp_path, rotation, cropped):
+    source = tmp_path / "source.pdf"
+    output = tmp_path / "mirrored.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=240, height=160)
+    page.draw_rect(pymupdf.Rect(-3, 10, 238, 150), width=2)
+    page.insert_text((30, 70), "Scale 1:100", fontsize=12)
+    if cropped:
+        page.set_cropbox(pymupdf.Rect(10, 5, 230, 155))
+    page.set_rotation(rotation)
+    doc.save(source)
+    doc.close()
+    mirror_pdf(source, output)
+    with pymupdf.open(source) as src, pymupdf.open(output) as out:
+        before, after = src[0], out[0]
+        assert after.rotation == before.rotation
+        assert after.mediabox == before.mediabox
+        assert after.cropbox == before.cropbox
+        assert after.rect == before.rect
+        assert after.get_drawings()[0]['rect'].width == pytest.approx(
+            before.get_drawings()[0]['rect'].width)
+        assert after.get_drawings()[0]['width'] == before.get_drawings()[0]['width']
+        assert after.get_texttrace()[0]['size'] == pytest.approx(12)
+        for dpi in (150, 300):
+            a, b = before.get_pixmap(dpi=dpi), after.get_pixmap(dpi=dpi)
+            assert (a.width, a.height) == (b.width, b.height)
+
+
+@pytest.mark.parametrize("axis", list(Axis))
+def test_edge_clipping_renders_as_exact_reflection(tmp_path, axis):
+    import numpy as np
+    source, output = tmp_path / "geometry.pdf", tmp_path / "mirror.pdf"
+    doc = pymupdf.open()
+    page = doc.new_page(width=240, height=160)
+    page.draw_rect(pymupdf.Rect(-4, 0, 205, 154), width=3)
+    page.draw_line((25, 50), (232, 119), width=1)
+    page.draw_rect(pymupdf.Rect(38, 24, 100, 53), fill=(0, 0, 0))
+    doc.save(source)
+    doc.close()
+    mirror_pdf(source, output, axis=axis)
+    with pymupdf.open(source) as src, pymupdf.open(output) as out:
+        def pixels(page):
+            pix = page.get_pixmap(dpi=144, colorspace=pymupdf.csGRAY)
+            return np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width)
+        want = pixels(src[0])
+        if axis in (Axis.VERTICAL, Axis.BOTH):
+            want = np.fliplr(want)
+        if axis in (Axis.HORIZONTAL, Axis.BOTH):
+            want = np.flipud(want)
+        got = pixels(out[0])
+        assert got.shape == want.shape
+        # MuPDF can round antialias coverage differently after reflection.
+        assert np.mean(np.abs(got.astype(float) - want)) < 0.2
