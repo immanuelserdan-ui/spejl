@@ -29,7 +29,7 @@ raster = [
     "fonttools>=4.53",  # S8 QA gate: font cmap lookup, see qa/self_correct.py
 ]
 gui = [
-    "PySide6>=6.7",
+    "PySide6>=6.7,<6.12",
 ]
 
 [project.scripts]
