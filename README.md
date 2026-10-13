@@ -101,11 +101,13 @@ spejl mirror plan.png --axis v      # same CLI as the vector path
 
 ### Public installer and updates
 
-Every push to `main` runs `.github/workflows/release.yml`. GitHub Actions
-builds the Windows installer and publishes it as a GitHub Release. Installed
+Every push to `main` runs `.github/workflows/release.yml` and builds and
+smoke-tests the Windows installer. Publishing is a separate manual action:
+run the workflow with `publish_release` enabled only after confirming that
+the project has the rights needed to distribute the bundled dependencies.
+The release job receives write access only after the build succeeds. Installed
 copies check the latest release in the background and offer the installer
-when a newer version is available. A commit becomes user-visible only after
-the complete installer build succeeds.
+when a newer version is available.
 
 Command line:
 `python -m spejl.cli mirror <file>` routes automatically — vector PDF
@@ -151,11 +153,13 @@ raster image. Verified by running the real OCR pipeline (both routes,
 against the golden fixture) from inside a frozen build before
 shipping — see the build session's log for the console-mode proof.
 
-One licensing note before distributing this *outside* the team:
-PyMuPDF (Route A) is dual-licensed AGPL-3.0 / commercial. Fine bundled
-into an internal tool; a commercial license (or a swap to the BSD/
-Apache-licensed `pypdfium2`) is needed before shipping the exe to
-anyone outside the organisation.
+Before distributing this outside the team, resolve the licensing terms for
+PyMuPDF (Route A), which is dual-licensed AGPL-3.0 / commercial. The public
+installer is therefore not published automatically. Confirm that the chosen
+distribution model is covered by the applicable license, or replace PyMuPDF
+with a compatible alternative, before manually publishing a release. The
+repository currently has no top-level project license; choose and add one
+before inviting external contributions or redistributing the project itself.
 
 Reviewed and code-reviewed before this build: 21 candidate bugs found
 across 4 parallel review passes plus empirical stress-testing, 17
