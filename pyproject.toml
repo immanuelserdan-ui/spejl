@@ -21,7 +21,8 @@ dev = [
     "scikit-image>=0.22",
 ]
 raster = [
-    "opencv-python-headless>=4.9",
+    # RapidOCR requires this wheel too; avoid overlapping cv2 distributions.
+    "opencv-python>=4.9",
     "numpy>=1.26",
     "pillow>=10.3",
     "rapidocr-onnxruntime>=1.3",
