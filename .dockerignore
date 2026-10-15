@@ -1,0 +1,23 @@
+# Allow only build inputs. Local plans, credentials, venvs and installers stay out.
+**
+!Dockerfile
+!pyproject.toml
+!README.md
+!spejl/
+!spejl/**
+!tests/
+!tests/**
+!tools/
+!tools/**
+!installer/
+!installer/Spejl.iss
+!docker/
+!docker/*.py
+**/__pycache__/
+**/*.pyc
+**/.pytest_cache/
+**/.env
+**/.env.*
+**/*.pem
+**/*.key
+spejl/_build_version.py

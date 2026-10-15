@@ -131,6 +131,23 @@ suffix added to new exports that have the same name.
 python -m spejl.gui       # or: spejl-app, once installed
 ```
 
+### Docker command-line workflow
+
+The CLI also runs in a Linux container with its OCR models, fonts and native
+libraries included. Use it for batch processing and consistent test environments:
+
+```sh
+docker compose build spejl
+docker compose run --rm spejl mirror /work/plan.pdf --axis v
+```
+
+Place inputs in `workspace/` first; outputs and JSON sidecars are written there.
+Linux users must set their host UID/GID for the bind mount. See
+[`docker/README.md`](docker/README.md) for Windows/Linux setup, batch commands,
+the separate test image, and offline runtime validation.
+
+### Windows desktop installer
+
 **Packaged as a standalone .exe** — no Python install needed to run it:
 
 ```bash

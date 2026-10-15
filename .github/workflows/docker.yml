@@ -1,0 +1,57 @@
+name: Test Docker image
+
+on:
+  push:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - compose.yaml
+      - docker/**
+      - spejl/**
+      - tests/**
+      - tools/**
+      - installer/Spejl.iss
+      - pyproject.toml
+      - .github/workflows/docker.yml
+  pull_request:
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - compose.yaml
+      - docker/**
+      - spejl/**
+      - tests/**
+      - tools/**
+      - installer/Spejl.iss
+      - pyproject.toml
+      - .github/workflows/docker.yml
+
+permissions:
+  contents: read
+
+jobs:
+  docker:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Check out source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set bind-mount ownership
+        run: |
+          mkdir -p workspace
+          printf 'SPEJL_UID=%s\nSPEJL_GID=%s\n' "$(id -u)" "$(id -g)" >> "$GITHUB_ENV"
+
+      - name: Build CLI and test images
+        run: docker compose --profile test build spejl tests
+
+      - name: Check CLI entrypoint
+        run: docker compose run --rm spejl --help
+
+      - name: Test installed runtime and OCR without network access
+        run: docker compose run --rm --entrypoint python spejl /opt/spejl-smoke.py
+
+      - name: Run regression suite in the test image
+        run: docker compose --profile test run --rm tests

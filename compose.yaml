@@ -1,0 +1,32 @@
+services:
+  spejl:
+    image: spejl:local
+    build:
+      context: .
+      target: runtime
+    user: "${SPEJL_UID:-10001}:${SPEJL_GID:-10001}"
+    volumes:
+      - type: bind
+        source: ${SPEJL_WORKDIR:-./workspace}
+        target: /work
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true
+
+  tests:
+    image: spejl:test
+    build:
+      context: .
+      target: test
+    profiles: [test]
+    network_mode: none
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    init: true

@@ -17,3 +17,4 @@ installer/payload/
 build-installer/
 dist-installer/
 releases/
+workspace/
