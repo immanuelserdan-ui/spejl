@@ -95,6 +95,8 @@ def test_real_fixture_dimensions_end_up_perfectly_consistent():
     independently, land across a 25-30px spread before clustering —
     confirmed to collapse to one size after.
     """
+    from importlib.resources import as_file, files
+
     import cv2
 
     from spejl.detect.ocr import RapidOcrBackend
@@ -102,7 +104,9 @@ def test_real_fixture_dimensions_end_up_perfectly_consistent():
     from spejl.lexicon.snap import snap
     from spejl.style.metrics import fit_style
 
-    img = cv2.imread("spejl/qa/golden/plan_150.png")
+    with as_file(files("spejl.qa").joinpath("golden", "plan_150.png")) as fixture:
+        img = cv2.imread(str(fixture))
+    assert img is not None, "Golden OCR fixture is missing or unreadable."
     dets = detect_all_orientations(img, RapidOcrBackend())
 
     runs = []

@@ -6,6 +6,8 @@ OCR models and fonts. The desktop editor and Windows installer continue to be
 the interface for interactive editing; the container runs `spejl mirror`.
 This is an optional batch/development workflow: it requires Docker Engine or
 Docker Desktop and extra image storage, and does not change OCR accuracy.
+Rendering uses Liberation Sans/DejaVu on Linux, so font substitution can differ
+from the Windows desktop environment.
 
 ## Build and mirror a plan
 
