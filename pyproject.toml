@@ -8,7 +8,8 @@ version = "0.1.0"
 description = "Mirror floor plans without mirroring the text."
 requires-python = ">=3.11"
 dependencies = [
-    "pymupdf>=1.24",
+    # PyMuPDF 2 changes image coverage and text bounds; retain verified 1.x behavior.
+    "pymupdf>=1.24,<2",
     "pikepdf>=10.13",
     "typer>=0.12",
 ]
