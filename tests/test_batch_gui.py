@@ -531,6 +531,44 @@ def test_only_checked_plan_is_mirrored(qapp, tmp_path, monkeypatch):
         window.close()
 
 
+def test_repeat_mirror_counts_only_checked_plans(qtbot, tmp_path, monkeypatch):
+    import pymupdf
+    from PySide6.QtCore import Qt
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.main_window import MainWindow
+
+    paths = [tmp_path / f"{name}-R-V00.pdf" for name in ("A", "B")]
+    for path in paths:
+        with pymupdf.open() as doc:
+            doc.new_page().insert_text((20, 50), path.stem)
+            doc.save(path)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._on_files_chosen(paths)
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", lambda dialog: dialog.DialogCode.Accepted)
+
+    def run_batch():
+        window._on_mirror_clicked()
+        progress = window._status_label.text()
+        qtbot.waitUntil(lambda: window._status_label.text().startswith("Batch complete:"), timeout=10000)
+        return progress, window._status_label.text()
+
+    assert run_batch()[1] == "Batch complete: 2 mirrored."
+    a, b = (window._batch_entries[p.resolve()] for p in paths)
+    previous_a, previous_b = a.output, b.output
+
+    def select_only_b(dialog):
+        dialog.list.item(0).setCheckState(Qt.CheckState.Unchecked)
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", select_only_b)
+    progress, summary = run_batch()
+    assert progress.startswith(f"Mirroring 1 of 1: {paths[1].name}")
+    assert summary == "Batch complete: 1 mirrored."
+    assert a.output == previous_a and a.output.is_file()
+    assert b.output != previous_b and b.output.is_file()
+
+
 def test_source_only_jpeg_export_without_mirroring(qapp, tmp_path, monkeypatch):
     import pymupdf
     from spejl.gui.batch_dialogs import JpegExportDialog
