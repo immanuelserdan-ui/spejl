@@ -7,7 +7,7 @@ from pathlib import Path
 import traceback
 
 
-def run(directory: str) -> int:
+def run(directory: str, plan: str | None = None) -> int:
     output = Path(directory).resolve()
     output.mkdir(parents=True, exist_ok=True)
     report = {"status": "failed", "checks": []}
@@ -25,6 +25,16 @@ def run(directory: str) -> int:
         from spejl.vector.pdf_mirror import mirror_pdf
 
         report["checks"].append("runtime imports")
+        if plan is not None:
+            source = Path(plan).resolve()
+            if source.parent == output:
+                raise ValueError("Choose a diagnostic directory separate from the input PDF.")
+            destination = output / (source.stem + "-mirrored.pdf")
+            result = mirror_pdf(source, destination)
+            report["plan"] = {
+                "output": str(destination),
+                "text_runs_mirrored": sum(page.text_runs_mirrored for page in result.pages),
+            }
         source_pdf = output / "sample.pdf"
         result_pdf = output / "sample_mirrored.pdf"
         with pymupdf.open() as doc:
@@ -85,6 +95,29 @@ def run(directory: str) -> int:
         if "Stue 1234" not in words or "Bad" not in words:
             raise RuntimeError("Assisted mirroring lost a label.")
         report["checks"].append("assisted mirroring of a picture-drawn plan")
+
+        # Exercise the actual frozen PDF writer: no resampling or loss of text,
+        # page scale, or coloured linework is allowed to buy a smaller file.
+        from spejl.vector.pdf_save import save_compact_pdf
+
+        compact_pdf = output / "compact.pdf"
+        with pymupdf.open(mixed_pdf) as original:
+            save_compact_pdf(original, compact_pdf)
+            with pymupdf.open(compact_pdf) as compact:
+                if original[0].rect != compact[0].rect:
+                    raise RuntimeError("PDF compression changed page scale.")
+                if original[0].get_text('words') != compact[0].get_text('words'):
+                    raise RuntimeError("PDF compression changed selectable text.")
+                if original[0].get_pixmap(dpi=300).samples != compact[0].get_pixmap(dpi=300).samples:
+                    raise RuntimeError("PDF compression changed rendered drawing pixels.")
+        if compact_pdf.stat().st_size >= mixed_pdf.stat().st_size / 5:
+            raise RuntimeError("PDF image streams were not compacted.")
+        report['pdf_compression'] = {
+            'before_bytes': mixed_pdf.stat().st_size,
+            'after_bytes': compact_pdf.stat().st_size,
+            'identical_300dpi_pixels_text_and_page_size': True,
+        }
+        report["checks"].append("lossless PDF compression, text and scale")
         report["status"] = "passed"
     except Exception:
         report["error"] = traceback.format_exc()

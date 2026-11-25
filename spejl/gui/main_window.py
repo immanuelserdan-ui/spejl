@@ -1757,16 +1757,20 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "Choose JPEG export folder", str(self._input_path.parent))
         if not directory:
             return
-        exported, errors = self._export_selected_jpegs(choices, Path(directory))
+        include_footer = dialog.footer.isChecked()
+        exported, errors = self._export_selected_jpegs(choices, Path(directory), include_footer)
+        if exported and not errors:
+            dialog.settings.setValue("jpeg/includeFooter", include_footer)
         self._status_label.setText(f"Exported {len(exported)} JPEG(s) to {directory}" +
                                    (f"; {len(errors)} failed" if errors else ""))
         if errors:
             QMessageBox.warning(self, "Some JPEGs could not be exported", "\n".join(errors[:10]))
 
-    def _export_selected_jpegs(self, choices: list[tuple[Path, str]], directory: Path) -> tuple[list[Path], list[str]]:
+    def _export_selected_jpegs(self, choices: list[tuple[Path, str]], directory: Path,
+                               include_footer: bool = False) -> tuple[list[Path], list[str]]:
         """Export every page of the selected PDFs without overwriting existing files."""
         import pymupdf
-        from PIL import Image
+        from spejl.gui.jpeg_export import encode_plan_jpeg
 
         directory.mkdir(parents=True, exist_ok=True)
         exported: list[Path] = []
@@ -1791,12 +1795,9 @@ class MainWindow(QMainWindow):
                         while destination.exists():
                             destination = directory / f"{base}_{counter}.jpg"
                             counter += 1
-                        pixmap = page.get_pixmap(dpi=_EXPORT_DPI, alpha=False)
-                        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-                        # The DPI tag makes Revit/AutoCAD place the image at the
-                        # sheet's true size instead of guessing 72/96 dpi.
-                        image.save(destination, format="JPEG", quality=95, subsampling=0,
-                                   dpi=(_EXPORT_DPI, _EXPORT_DPI))
+                        data = encode_plan_jpeg(page, 97 if kind == "mirrored" else 95,
+                                                include_footer=include_footer)
+                        destination.write_bytes(data)
                         exported.append(destination)
             except Exception as exc:
                 errors.append(f"{kind.title()} {entry.display_name or source.name}: {exc}")

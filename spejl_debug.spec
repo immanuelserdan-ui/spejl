@@ -37,6 +37,7 @@ a = Analysis(
     pathex=[],
     binaries=[],
     datas=[
+        ("spejl/gui/assets/2d-footer.png", "spejl/gui/assets"),
         ("spejl/lexicon/da_dk.json", "spejl/lexicon"),
         *rapidocr_datas,
     ],

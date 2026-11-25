@@ -57,6 +57,7 @@ a = Analysis(
     pathex=[],
     binaries=explicit_runtime_binaries,
     datas=[
+        ("spejl/gui/assets/2d-footer.png", "spejl/gui/assets"),
         ("spejl/lexicon/da_dk.json", "spejl/lexicon"),
         ("spejl/gui/assets/dynamic-konsept-spinning-mark.png", "spejl/gui/assets"),
         *rapidocr_datas,

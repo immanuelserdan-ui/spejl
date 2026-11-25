@@ -4,7 +4,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from PySide6.QtCore import Qt
+import pymupdf
+from PySide6.QtCore import QSettings, Qt, QTimer
+from PySide6.QtGui import QPixmap
+from spejl.gui.jpeg_export import encode_plan_jpeg
 from PySide6.QtWidgets import (
     QCheckBox, QDialog, QDialogButtonBox, QGridLayout, QHBoxLayout,
     QLabel, QListWidget, QListWidgetItem, QPushButton, QScrollArea,
@@ -61,7 +64,15 @@ class JpegExportDialog(QDialog):
     def __init__(self, entries: list[BatchEntry], parent=None):
         super().__init__(parent)
         self.setWindowTitle("Choose PDFs to export as JPEG")
-        self.resize(780, 570)
+        self.resize(960, 610)
+        self.settings = QSettings("Spejl", "Spejl")
+        self.footer = QCheckBox("Include footer text")
+        self.footer.setChecked(self.settings.value("jpeg/includeFooter", True, type=bool))
+        self._previews = []
+        self._thumbnail_cache = {}
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setSingleShot(True)
+        self._preview_timer.timeout.connect(self._render_next_preview)
         self.setStyleSheet("""
             QDialog { background: #07111F; color: #EAF7FB; }
             QLabel { color: #D7EEF5; }
@@ -115,17 +126,10 @@ class JpegExportDialog(QDialog):
                 cell_layout = QVBoxLayout(cell)
                 cell_layout.setContentsMargins(4, 4, 4, 4)
                 if path is not None and path.is_file():
-                    try:
-                        preview = load_preview(path, dpi=54)
-                    except Exception:
-                        preview = None
                     thumb = QLabel()
                     thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
-                    thumb.setMinimumSize(145, 120)
-                    thumb.setText("Preview unavailable")
-                    if preview is not None:
-                        thumb.setPixmap(preview.scaled(145, 120, Qt.AspectRatioMode.KeepAspectRatio,
-                                                       Qt.TransformationMode.SmoothTransformation))
+                    thumb.setMinimumSize(240, 180)
+                    self._previews.append((path, kind, thumb))
                     cell_layout.addWidget(thumb)
                     checkbox = QCheckBox("Export " + kind)
                     checkbox.setChecked(True)
@@ -139,11 +143,46 @@ class JpegExportDialog(QDialog):
         grid.setColumnStretch(2, 1)
         scroll.setWidget(body)
         layout.addWidget(scroll)
+        layout.addWidget(self.footer)
+        self.footer.toggled.connect(self._refresh_previews)
+        self._refresh_previews()
         buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         buttons.button(QDialogButtonBox.StandardButton.Ok).setText("Choose export folder")
         buttons.accepted.connect(self.accept)
         buttons.rejected.connect(self.reject)
         layout.addWidget(buttons)
+
+    def _refresh_previews(self):
+        self._pending_previews = []
+        for path, kind, label in self._previews:
+            key = (path, kind, self.footer.isChecked())
+            if key in self._thumbnail_cache:
+                label.setPixmap(self._thumbnail_cache[key])
+            else:
+                label.setText("Preparing preview…")
+                self._pending_previews.append((key, label))
+        self._preview_timer.start(0)
+
+    def _render_next_preview(self):
+        if not self._pending_previews:
+            return
+        (path, kind, footer), label = self._pending_previews.pop(0)
+        try:
+            with pymupdf.open(path) as doc:
+                data = encode_plan_jpeg(doc[0], 97 if kind == "mirrored" else 95,
+                                        include_footer=footer)
+            image = QPixmap()
+            if not image.loadFromData(data, "JPEG"):
+                raise ValueError("Unable to decode JPEG")
+            thumb = image.scaled(260, 220, Qt.AspectRatioMode.KeepAspectRatio,
+                                 Qt.TransformationMode.SmoothTransformation)
+            label.setPixmap(thumb)
+            self._thumbnail_cache[path, kind, footer] = thumb
+        except Exception as exc:
+            label.setText("Preview unavailable")
+            label.setToolTip(str(exc))
+        if self._pending_previews:
+            self._preview_timer.start(0)
 
     def selected_items(self) -> list[tuple[Path, str]]:
         return [(path, kind) for path, kind, checkbox in self._choices if checkbox.isChecked()]
