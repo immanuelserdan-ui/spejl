@@ -29,13 +29,22 @@ def stage(source: Path, destination: Path) -> None:
         "Spejl.exe", "_internal/python312.dll", "_internal/_socket.pyd",
         "_internal/vcruntime140.dll", "_internal/vcruntime140_1.dll",
         "_internal/msvcp140.dll", "_internal/rapidocr_onnxruntime/config.yaml",
-        "_internal/libssl-3-x64.dll", "_internal/libcrypto-3-x64.dll",
         "_internal/PySide6/plugins/platforms/qwindows.dll",
-        "_internal/spejl/lexicon/da_dk.json",
+        "_internal/spejl/lexicon/da_dk.json", "_internal/spejl/gui/assets/2d-footer.png",
     )
     for relative in required:
         if not (source / relative).is_file():
             raise SystemExit(f"Incomplete frozen app: {relative}")
+    # CPython distributions differ in the names of their OpenSSL DLLs.
+    # Check the names imported by this bundle's Windows extension.
+    import pefile
+
+    with pefile.PE(str(source / "_internal/_ssl.pyd")) as ssl_module:
+        openssl = [entry.dll.decode("ascii") for entry in ssl_module.DIRECTORY_ENTRY_IMPORT
+                   if entry.dll.lower().startswith((b"libssl", b"libcrypto"))]
+    for dll in openssl:
+        if not (source / "_internal" / dll).is_file():
+            raise SystemExit(f"Incomplete frozen app: _internal/{dll}")
     if len(list((source / "_internal/rapidocr_onnxruntime").rglob("*.onnx"))) < 3:
         raise SystemExit("OCR model files are missing.")
     shutil.copytree(source, destination)

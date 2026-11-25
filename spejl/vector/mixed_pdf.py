@@ -283,7 +283,9 @@ def prepare_mixed_pdf(input_path: Path, output_path: Path, labels: list[PictureL
                 origin, size, rotate = _fit_text(page, label)
                 page.insert_text(origin, label.text.strip(), fontsize=size,
                                  fontname=_REFERENCE_FONT, rotate=rotate, color=(0, 0, 0))
-            doc.save(str(output_path), garbage=3, deflate=True)
+            from spejl.vector.pdf_save import save_compact_pdf
+
+            save_compact_pdf(doc, output_path)
     return chosen
 
 

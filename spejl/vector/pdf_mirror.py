@@ -12,6 +12,7 @@ them to quarter turns.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from itertools import zip_longest
 import math
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -22,6 +23,8 @@ import pikepdf
 
 from spejl.models import Axis, Document, Flag, PageResult, Route
 from spejl.transform import mirror as M
+from spejl.vector.text_page import TextPage, compose
+from spejl.vector.pdf_save import save_compact_pdf
 
 if TYPE_CHECKING:
     import numpy as np
@@ -96,33 +99,12 @@ def mirror_pdf(
                           + raster.document.pages[0].flags,
                 ))
                 continue
-            # Copy the complete original page first.  This retains embedded
-            # fonts, XObjects, colour spaces and every CAD drawing operator.
-            # We then replace only its content stream with an equivalent
-            # mirrored stream whose text matrices have been corrected.
-            out.insert_pdf(src, from_page=page_index, to_page=page_index)
-            new_page = out[-1]
-            transformed, expected = _transform_vector_content(
-                pike_src.pages[page_index], page, W, H, axis
-            )
-            xref = out.get_new_xref()
-            out.update_object(xref, "<<>>")
-            out.update_stream(xref, transformed)
-            new_page.set_contents(xref)
-            transformed, expected = _calibrate_text_translations(
-                transformed, new_page, expected, width=W, height=H, axis=axis
-            )
-            if transformed != new_page.read_contents():
-                out.update_stream(xref, transformed)
-                new_page.set_contents(xref)
-            _verify_text_transforms(
-                page, new_page, expected, W, H, axis, transformed,
-                _pdf_reflection_matrix(pike_src.pages[page_index], axis),
-            )
+            with pikepdf.Pdf.new() as working:
+                layout = TextPage(working, pike_src.pages[page_index])
+                mirrored, expected = _mirror_text_page(layout, page, W, H, axis)
+                with mirrored:
+                    out.insert_pdf(mirrored)
 
-            # Preserve the source paper and clipping exactly. Bounds reported
-            # for strokes can extend outside the visible sheet; that is not
-            # a reason to resize the drawing or add white paper to the mirror.
             result.pages.append(
                 PageResult(
                     index=page_index,
@@ -133,7 +115,7 @@ def mirror_pdf(
                 )
             )
 
-        out.save(str(output_path))
+        save_compact_pdf(out, output_path)
         # Validate the serialized file, not only the in-memory page used by
         # the matrix QA above.  Some PDF writers defer resource resolution
         # until save; reopening and rendering catches a corrupt stream before
@@ -157,8 +139,11 @@ def mirror_pdf(
             # survive stream replacement even though text extraction works.
             # Do not return a blank deliverable: render the original page and
             # mirror that complete image as a safe, explicitly flagged PDF.
-            fallback_pages = _write_raster_pdf_fallback(src, output_path, axis)
-            result.pages = fallback_pages
+            fallback_pages = _write_raster_pdf_fallback(
+                src, output_path, axis, page_indexes=set(blank_pages),
+            )
+            replacements = {page.index: page for page in fallback_pages}
+            result.pages = [replacements.get(page.index, page) for page in result.pages]
     finally:
         out.close()
         src.close()
@@ -460,20 +445,31 @@ def _pixmap_has_ink(pixmap: pymupdf.Pixmap) -> bool:
 
 
 def _write_raster_pdf_fallback(
-    source: pymupdf.Document, output_path: Path, axis: Axis
+    source: pymupdf.Document, output_path: Path, axis: Axis,
+    *, page_indexes: set[int] | None = None,
 ) -> list[PageResult]:
-    """Write a visible image-PDF when a vector page serializes blank."""
+    """Replace only failed pages, preserving successful vector pages verbatim."""
     from spejl.raster.pipeline import mirror_raster
 
     pages: list[PageResult] = []
-    with TemporaryDirectory(prefix="spejl-pdf-fallback-") as temporary:
-        raster_pdf = pymupdf.open()
+    with TemporaryDirectory(prefix="spejl-pdf-fallback-") as temporary, pymupdf.open() as raster_pdf:
+        # Read the serialized candidate before replacing it. Closing this
+        # handle before save also releases the Windows file lock.
+        if page_indexes is not None:
+            with pymupdf.open(str(output_path)) as candidate:
+                raster_pdf.insert_pdf(candidate)
         for index, page in enumerate(source):
+            if page_indexes is not None and index not in page_indexes:
+                continue
             source_png = Path(temporary) / f"source-{index}.png"
             output_png = Path(temporary) / f"mirror-{index}.png"
             page.get_pixmap(dpi=300, alpha=False).save(str(source_png))
             raster = mirror_raster(source_png, output_png, axis=axis)
-            target = raster_pdf.new_page(width=page.rect.width, height=page.rect.height)
+            if page_indexes is not None:
+                raster_pdf.delete_page(index)
+                target = raster_pdf.new_page(pno=index, width=page.rect.width, height=page.rect.height)
+            else:
+                target = raster_pdf.new_page(width=page.rect.width, height=page.rect.height)
             target.insert_image(target.rect, filename=str(output_png))
             pages.append(PageResult(
                 index=index,
@@ -486,8 +482,7 @@ def _write_raster_pdf_fallback(
                     "warn",
                 )] + raster.document.pages[0].flags,
             ))
-        raster_pdf.save(str(output_path))
-        raster_pdf.close()
+        save_compact_pdf(raster_pdf, output_path)
     return pages
 
 
@@ -504,21 +499,7 @@ class _TextExpectation:
     text: str
     start: tuple[float, float]
     end: tuple[float, float]
-    source_matrix: tuple[float, float, float, float, float, float]
-    output_matrix: tuple[float, float, float, float, float, float]
-
-
-@dataclass
-class _TextState:
-    """Complete PDF text state preserved while walking one ``BT`` block."""
-
-    font: object | None = None
-    size: float | None = None
-    char_spacing: float = 0.0
-    word_spacing: float = 0.0
-    horizontal_scale: float = 100.0
-    rise: float = 0.0
-    matrix: tuple[float, float, float, float, float, float] | None = None
+    direction: tuple[float, float]
 
 
 class VectorTextTransformError(ValueError):
@@ -603,87 +584,22 @@ def _glyph_box_flip_shift(run: dict) -> float:
     return float(run["size"]) * (float(run["ascender"]) + float(run["descender"]))
 
 
-def _mul_text_matrix_by_reflection(
-    matrix: list[float], advance: float, reverse_baseline: bool, y_shift: float = 0.0
-) -> list[float]:
-    """Apply a readable local reflection to one PDF ``Tm``.
+def _mirror_text_page(layout, source_page, width, height, axis):
+    with layout.render() as normalized:
+        traces = _trace_runs(normalized[0])
+    # Splitting text objects may split a trace, but must preserve every glyph
+    # and origin before any reflection is applied.
+    def glyphs(runs):
+        return (char for run in runs for char in run["chars"])
 
-    The page is globally reflected.  A second, local reflection makes the
-    combined glyph transform orientation-preserving.  Flipping the local y
-    axis (about ``y_shift / 2`` in text space) keeps an already-readable
-    reflected baseline; flipping local x and translating by the exact traced
-    advance reverses a backwards baseline while retaining the original
-    string and its raw ``TJ`` spacing.
-    """
-    a, b, c, d, e, f = matrix
-    if reverse_baseline:
-        # M * [-1 0 0 1 advance 0]
-        return [-a, -b, c, d, e + a * advance, f + b * advance]
-    # M * [1 0 0 -1 0 y_shift]
-    return [a, b, -c, -d, e + c * y_shift, f + d * y_shift]
-
-
-def _transform_vector_content(
-    pike_page: pikepdf.Page,
-    source_page: pymupdf.Page,
-    width: float,
-    height: float,
-    axis: Axis,
-) -> tuple[bytes, list[_TextExpectation]]:
-    """Mirror a page while retaining its native PDF text operators.
-
-    Geometry and resources are left in the original content stream and the
-    whole page is wrapped in the reflection CTM.  Only ``Tm`` operators are
-    changed; font selection, ``Tc``, ``Tw``, ``Tz``, ``Ts`` and every
-    ``Tj``/``TJ`` operand are preserved exactly as supplied by the CAD PDF.
-    """
-    instructions = list(pikepdf.parse_content_stream(pike_page))
-    traces = _trace_runs(source_page)
-    trace_index = 0
-    expected: list[_TextExpectation] = []
-    rewritten: list[pikepdf.ContentStreamInstruction] = []
-    in_text = False
-    state: _TextState | None = None
-    # Current transformation matrix, so text scale is measured through
-    # ``Tm x CTM`` -- CAD writers often scale or condense text with ``cm``.
-    ctm: tuple[float, ...] = (1.0, 0.0, 0.0, 1.0, 0.0, 0.0)
-    ctm_stack: list[tuple[float, ...]] = []
-
-    for instruction in instructions:
-        operands, operator = instruction
-        name = str(operator)
-        if name == "q":
-            ctm_stack.append(ctm)
-        elif name == "Q" and ctm_stack:
-            ctm = ctm_stack.pop()
-        elif name == "cm" and len(operands) == 6:
-            ctm = _matrix_multiply(ctm, tuple(float(value) for value in operands))
-        if name == "BT":
-            if in_text:
-                raise VectorTextTransformError("Nested BT in PDF content stream.")
-            in_text, state = True, _TextState()
-            rewritten.append(instruction)
-            continue
-        if name == "ET":
-            if not in_text:
-                raise VectorTextTransformError("ET without a matching BT in PDF content stream.")
-            in_text, state = False, None
-            rewritten.append(instruction)
-            continue
-        if in_text and state is not None:
-            _record_text_state(state, name, operands)
-        if name != "Tm" or len(operands) != 6:
-            rewritten.append(instruction)
-            continue
-        if not in_text or state is None:
-            raise VectorTextTransformError("Tm outside BT/ET in PDF content stream.")
-        if trace_index >= len(traces):
-            raise VectorTextTransformError(
-                "PDF text matrix has no corresponding glyph trace; refusing a lossy vector mirror."
-            )
-
-        run = traces[trace_index]
-        trace_index += 1
+    for before, after in zip_longest(glyphs(_trace_runs(source_page)), glyphs(traces)):
+        if (before is None or after is None or before[:2] != after[:2]
+                or math.dist(before[2], after[2]) > 0.01):
+            raise VectorTextTransformError("Resolving PDF text positions changed a source glyph.")
+    if len(traces) != len(layout.placements):
+        raise VectorTextTransformError("Cannot match positioned PDF labels to visible glyph runs.")
+    expected = []
+    for slot, run in zip(layout.placements, traces, strict=True):
         start = tuple(float(v) for v in run["chars"][0][2])
         end = _trace_end(run)
         dx, dy = run["dir"]
@@ -694,64 +610,65 @@ def _transform_vector_content(
         # ``Tm x CTM`` maps text-space x/y to page space.  The traced
         # physical advance projected on the x column gives the local
         # translation required by the text-space reflection.
-        matrix = [float(value) for value in operands]
-        to_page = _matrix_multiply(ctm, tuple(matrix))
+        matrix = list(slot.matrix)
+        to_page = compose(slot.ctm, matrix)
         unit = math.hypot(to_page[0], to_page[1])
         if unit < 1e-9:
             raise VectorTextTransformError("Degenerate PDF text matrix.")
-        advance = math.hypot(end[0] - start[0], end[1] - start[1]) / unit
+        advance = math.dist(start, end) / unit
         raw_start = _mirror_point(*start, width, height, axis)
         raw_end = _mirror_point(*end, width, height, axis)
+        want_start, want_end = (raw_end, raw_start) if reverse else (raw_start, raw_end)
+        a, b, c, d, e, f = matrix
         if reverse:
-            replacement = _mul_text_matrix_by_reflection(matrix, advance, True)
-            want_start, want_end = raw_end, raw_start
-        else:
-            # Flipping local y keeps the baseline but turns the glyphs to
-            # the other side of it (a vertical dimension under a vertical
-            # mirror lands in the wall it used to sit beside). Shift the
-            # baseline by the glyph box's span so the box itself, not just
-            # its baseline, lands on its mirrored footprint.
+            e, f = e + a * advance, f + b * advance
+            a, b = -a, -b
+        # A single-axis reflection changes handedness. A two-axis
+        # reflection preserves it, so reversing x also requires reversing y.
+        flip_y = reverse if axis is Axis.BOTH else not reverse
+        if flip_y:
             text_shift = _glyph_box_flip_shift(run) / unit
-            shift = text_shift * math.hypot(to_page[2], to_page[3])
+            e, f = e + c * text_shift, f + d * text_shift
+            shift = text_shift * math.hypot(*to_page[2:4])
             up_x, up_y = _mirrored_screen_direction(dy, -dx, axis)
-            want_start = (raw_start[0] + up_x * shift, raw_start[1] + up_y * shift)
-            want_end = (raw_end[0] + up_x * shift, raw_end[1] + up_y * shift)
-            replacement = _mul_text_matrix_by_reflection(
-                matrix, advance, False, y_shift=text_shift,
-            )
-        rewritten.append(pikepdf.ContentStreamInstruction(replacement, operator))
+            want_start = (want_start[0] + up_x * shift, want_start[1] + up_y * shift)
+            want_end = (want_end[0] + up_x * shift, want_end[1] + up_y * shift)
+            c, d = -c, -d
+        slot.set_matrix((a, b, c, d, e, f))
+        expected.append(_TextExpectation(_run_text(run), want_start, want_end, (out_dx, out_dy)))
 
-        expected.append(_TextExpectation(
-            text=_run_text(run),
-            start=want_start,
-            end=want_end,
-            source_matrix=tuple(matrix),
-            output_matrix=tuple(replacement),
-        ))
-
-    if trace_index != len(traces):
-        raise VectorTextTransformError(
-            "PDF glyph trace has text with no Tm matrix; refusing a lossy vector mirror."
-        )
-
-    reflection = " ".join(f"{value:g}" for value in _pdf_reflection_matrix(pike_page, axis))
-    return b"q\n" + reflection.encode("ascii") + b" cm\n" + pikepdf.unparse_content_stream(rewritten) + b"\nQ\n", expected
-
-
-def _record_text_state(state: _TextState, name: str, operands: object) -> None:
-    """Record text state without replacing any original content operands."""
-    if name == "Tf" and len(operands) == 2:
-        state.font, state.size = operands[0], float(operands[1])
-    elif name == "Tc" and len(operands) == 1:
-        state.char_spacing = float(operands[0])
-    elif name == "Tw" and len(operands) == 1:
-        state.word_spacing = float(operands[0])
-    elif name == "Tz" and len(operands) == 1:
-        state.horizontal_scale = float(operands[0])
-    elif name == "Ts" and len(operands) == 1:
-        state.rise = float(operands[0])
-    elif name == "Tm" and len(operands) == 6:
-        state.matrix = tuple(float(value) for value in operands)
+    reflection = _pdf_reflection_matrix(layout.page, axis)
+    document = layout.render(reflection)
+    try:
+        actual = _trace_runs(document[0])
+        if len(actual) != len(expected):
+            raise VectorTextTransformError("Text-run count changed after vector mirror.")
+        changed = False
+        for slot, want, run in zip(layout.placements, expected, actual, strict=True):
+            start = run["chars"][0][2]
+            end = _trace_end(run)
+            if max(math.dist(start, want.start), math.dist(end, want.end)) <= _TEXT_TRANSFORM_TOLERANCE_PT:
+                continue
+            # Convert the mean screen-space error through the reflected form CTM.
+            dx = (want.start[0] - start[0] + want.end[0] - end[0]) / 2
+            dy = -(want.start[1] - start[1] + want.end[1] - end[1]) / 2
+            a, b, c, d, _, _ = compose(reflection, slot.ctm)
+            det = a*d - b*c
+            if abs(det) < 1e-12:
+                raise VectorTextTransformError("Degenerate PDF placement transform.")
+            matrix = list(slot.matrix)
+            matrix[4] += (d*dx - c*dy) / det
+            matrix[5] += (a*dy - b*dx) / det
+            slot.set_matrix(matrix)
+            changed = True
+        if changed:
+            document.close()
+            document = layout.render(reflection)
+        _verify_text_transforms(document[0], expected)
+        return document, expected
+    except Exception:
+        document.close()
+        raise
 
 
 def _mirrored_screen_direction(dx: float, dy: float, axis: Axis) -> tuple[float, float]:
@@ -775,126 +692,8 @@ def _mirror_bbox(
     )
 
 
-def _calibrate_text_translations(
-    stream: bytes,
-    output_page: pymupdf.Page,
-    expected: list[_TextExpectation],
-    *,
-    width: float,
-    height: float,
-    axis: Axis,
-) -> tuple[bytes, list[_TextExpectation]]:
-    """Remove PDF side-bearing drift while leaving all show operators intact.
-
-    Some CAD exporters put a non-zero left/right side bearing on short
-    annotations such as ``H*``.  The reflected ``Tm`` is mathematically
-    correct, but PyMuPDF reports the final ink endpoint rather than the
-    text-matrix advance.  If the discrepancy is a pure translation, adjust
-    only ``Tm.e/f`` by that reflected delta.  A changed baseline *length* is
-    rejected later by strict QA; this helper never changes font metrics or
-    ``Tj``/``TJ`` spacing.
-    """
-    actual = _trace_runs(output_page)
-    if len(actual) != len(expected):
-        return stream, expected
-    corrections: list[tuple[float, float]] = []
-    changed = False
-    for want, run in zip(expected, actual, strict=True):
-        got_start = tuple(float(v) for v in run["chars"][0][2])
-        got_end = _trace_end(run)
-        start_delta = (want.start[0] - got_start[0], want.start[1] - got_start[1])
-        end_delta = (want.end[0] - got_end[0], want.end[1] - got_end[1])
-        if max(math.dist(got_start, want.start), math.dist(got_end, want.end)) <= _TEXT_TRANSFORM_TOLERANCE_PT:
-            corrections.append((0.0, 0.0))
-            continue
-        # Use the midpoint of the endpoint deltas.  CAD exporters sometimes
-        # report a slightly different side bearing for the final glyph (most
-        # visible on ``H*``); correcting the midpoint removes the translation
-        # component while strict QA below still rejects any real length error.
-        correction = (
-            (start_delta[0] + end_delta[0]) / 2.0,
-            (start_delta[1] + end_delta[1]) / 2.0,
-        )
-        # Convert screen-space movement back through the page reflection.
-        if axis is Axis.VERTICAL:
-            raw_delta = (-correction[0], correction[1])
-        elif axis is Axis.HORIZONTAL:
-            raw_delta = (correction[0], -correction[1])
-        else:
-            raw_delta = (-correction[0], -correction[1])
-        corrections.append(raw_delta)
-        changed = True
-    if not changed:
-        return stream, expected
-
-    holder = pikepdf.Pdf.new()
-    rewritten: list[pikepdf.ContentStreamInstruction] = []
-    matrix_index = 0
-    for operands, operator in pikepdf.parse_content_stream(pikepdf.Stream(holder, stream)):
-        if str(operator) == "Tm" and len(operands) == 6:
-            matrix = [float(value) for value in operands]
-            if matrix_index < len(corrections):
-                de, df = corrections[matrix_index]
-                matrix[4] += de
-                matrix[5] += df
-                matrix_index += 1
-            rewritten.append(pikepdf.ContentStreamInstruction(matrix, operator))
-        else:
-            rewritten.append(pikepdf.ContentStreamInstruction(operands, operator))
-    # ``stream`` already contains the single outer ``q / reflection cm`` and
-    # ``Q``.  Re-serialise the complete instruction list once; adding a new
-    # wrapper here would apply the page reflection twice.
-    adjusted = pikepdf.unparse_content_stream(rewritten)
-    adjusted_expected = [
-        _TextExpectation(
-            text=item.text,
-            start=item.start,
-            end=item.end,
-            source_matrix=item.source_matrix,
-            output_matrix=tuple(
-                value + (corrections[i][0] if j == 4 else corrections[i][1] if j == 5 else 0.0)
-                for j, value in enumerate(item.output_matrix)
-            ),
-        )
-        for i, item in enumerate(expected)
-    ]
-    return adjusted, adjusted_expected
-
-
-def _verify_text_transforms(
-    source_page: pymupdf.Page,
-    output_page: pymupdf.Page,
-    expected: list[_TextExpectation],
-    width: float,
-    height: float,
-    axis: Axis,
-    output_stream: bytes,
-    reflection_matrix: tuple[float, float, float, float, float, float],
-) -> None:
-    """Strict post-write baseline and affine-transform QA for every run."""
-    matrix_pdf = pikepdf.Pdf.new()
-    matrices = [
-        tuple(float(value) for value in operands)
-        for operands, operator in pikepdf.parse_content_stream(
-            pikepdf.Stream(matrix_pdf, output_stream)
-        )
-        if str(operator) == "Tm" and len(operands) == 6
-    ]
-    if len(matrices) != len(expected):
-        raise VectorTextTransformError(
-            f"Text-matrix count changed after vector mirror ({len(expected)} -> {len(matrices)})."
-        )
-    reflection = reflection_matrix
-    for index, (want, matrix) in enumerate(zip(expected, matrices, strict=True)):
-        effective = _matrix_multiply(reflection, matrix)
-        wanted_effective = _matrix_multiply(reflection, want.output_matrix)
-        if max(abs(actual - desired) for actual, desired in zip(matrix, want.output_matrix, strict=True)) > 1e-6 or max(
-            abs(actual - desired) for actual, desired in zip(effective, wanted_effective, strict=True)
-        ) > 1e-6:
-            raise VectorTextTransformError(
-                f"Text transform QA failed for run {index}: output matrix is not the reflected source matrix."
-            )
-
+def _verify_text_transforms(output_page, expected):
+    """Verify text and both reflected endpoints on the serialized page."""
     actual = _trace_runs(output_page)
     if len(actual) != len(expected):
         raise VectorTextTransformError(
@@ -904,7 +703,7 @@ def _verify_text_transforms(
         got_text = _run_text(run)
         got_start = tuple(float(v) for v in run["chars"][0][2])
         got_end = _trace_end(run)
-        if got_text != want.text or max(
+        if got_text != want.text or math.dist(run["dir"], want.direction) > 1e-4 or max(
             math.dist(got_start, want.start), math.dist(got_end, want.end)
         ) > _TEXT_TRANSFORM_TOLERANCE_PT:
             raise VectorTextTransformError(
@@ -912,20 +711,6 @@ def _verify_text_transforms(
                 f"baseline differs from the reflected source by more than "
                 f"{_TEXT_TRANSFORM_TOLERANCE_PT} pt."
             )
-
-
-def _matrix_multiply(
-    left: tuple[float, float, float, float, float, float],
-    right: tuple[float, float, float, float, float, float],
-) -> tuple[float, float, float, float, float, float]:
-    """Compose PDF affine matrices: result applies ``right`` then ``left``."""
-    a, b, c, d, e, f = left
-    A, B, C, D, E, F = right
-    return (
-        a * A + c * B, b * A + d * B,
-        a * C + c * D, b * C + d * D,
-        a * E + c * F + e, b * E + d * F + f,
-    )
 
 
 def _extract_text_spans(page: pymupdf.Page) -> list[dict]:

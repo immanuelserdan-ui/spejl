@@ -179,6 +179,7 @@ class MainWindow(QMainWindow):
         self._batch_entries: dict[Path, BatchEntry] = {}
         self._batch_order: list[Path] = []
         self._batch_queue: list[Path] = []
+        self._run_entries: tuple[BatchEntry, ...] = ()
         self._batch_axis: Axis | None = None
         self._active_batch_path: Path | None = None
         self._selecting_batch_item = False
@@ -663,6 +664,7 @@ class MainWindow(QMainWindow):
         """Return all loaded and generated plan state to its initial UI state."""
         self._batch_entries.clear()
         self._batch_order.clear()
+        self._run_entries = ()
         self._batch_queue.clear()
         self._batch_axis = None
         self._active_batch_path = None
@@ -1474,6 +1476,7 @@ class MainWindow(QMainWindow):
             self._status_label.setText("Select at least one PDF to mirror.")
             return
         self._batch_axis = next(a for a, btn in self._axis_buttons.items() if btn.isChecked())
+        self._run_entries = tuple(self._batch_entries[path] for path in selected)
         self._batch_queue = selected
         self._mirror_button.setEnabled(False)
         self._review_picture_button.setEnabled(False)
@@ -1496,10 +1499,11 @@ class MainWindow(QMainWindow):
             self._cancel_button.hide()
             self._mirror_button.setEnabled(bool(self._batch_order))
             self._save_button.setEnabled(bool(self._batch_order))
-            completed = sum(entry.status == "completed" for entry in self._batch_entries.values())
-            failed = [entry for entry in self._batch_entries.values() if entry.status == "failed"]
+            entries = self._run_entries
+            completed = sum(entry.status == "completed" for entry in entries)
+            failed = [entry for entry in entries if entry.status == "failed"]
             skipped = sum(entry.status == "queued" and entry.blocking_problem is not None
-                          for entry in self._batch_entries.values())
+                          for entry in entries)
             self._status_label.setText(
                 f"Batch complete: {completed} mirrored"
                 + (f", {len(failed)} failed. {_failure_summary(failed)}" if failed else ".")
@@ -1513,7 +1517,7 @@ class MainWindow(QMainWindow):
         self._active_batch_path = job_input
         index = self._batch_order.index(job_input)
         output_path = Path(self._temp_dir.name) / f"{index:04d}_{uuid4().hex}_{entry.mirrored_name}"
-        self._status_label.setText(f"Mirroring {index + 1} of {len(self._batch_order)}: {job_input.name}")
+        self._on_job_stage_changed("")
         self._refresh_batch_lists()
         self._worker = self._job_controller.start(
             job_input, output_path, self._batch_axis or Axis.VERTICAL, entry.picture_labels
@@ -1587,6 +1591,11 @@ class MainWindow(QMainWindow):
         QTimer.singleShot(0, self._start_next_batch_job)
 
     def _on_job_stage_changed(self, message: str) -> None:
+        if self._active_batch_path is not None and self._run_entries:
+            total = len(self._run_entries)
+            position = total - len(self._batch_queue)
+            prefix = f"Mirroring {position} of {total}: {self._active_batch_path.name}"
+            message = f"{prefix} — {message}" if message else prefix
         self._status_label.setText(message)
 
     def _on_cancel_available_changed(self, available: bool) -> None:
@@ -1748,16 +1757,20 @@ class MainWindow(QMainWindow):
         directory = QFileDialog.getExistingDirectory(self, "Choose JPEG export folder", str(self._input_path.parent))
         if not directory:
             return
-        exported, errors = self._export_selected_jpegs(choices, Path(directory))
+        include_footer = dialog.footer.isChecked()
+        exported, errors = self._export_selected_jpegs(choices, Path(directory), include_footer)
+        if exported and not errors:
+            dialog.settings.setValue("jpeg/includeFooter", include_footer)
         self._status_label.setText(f"Exported {len(exported)} JPEG(s) to {directory}" +
                                    (f"; {len(errors)} failed" if errors else ""))
         if errors:
             QMessageBox.warning(self, "Some JPEGs could not be exported", "\n".join(errors[:10]))
 
-    def _export_selected_jpegs(self, choices: list[tuple[Path, str]], directory: Path) -> tuple[list[Path], list[str]]:
+    def _export_selected_jpegs(self, choices: list[tuple[Path, str]], directory: Path,
+                               include_footer: bool = False) -> tuple[list[Path], list[str]]:
         """Export every page of the selected PDFs without overwriting existing files."""
         import pymupdf
-        from PIL import Image
+        from spejl.gui.jpeg_export import encode_plan_jpeg
 
         directory.mkdir(parents=True, exist_ok=True)
         exported: list[Path] = []
@@ -1782,12 +1795,9 @@ class MainWindow(QMainWindow):
                         while destination.exists():
                             destination = directory / f"{base}_{counter}.jpg"
                             counter += 1
-                        pixmap = page.get_pixmap(dpi=_EXPORT_DPI, alpha=False)
-                        image = Image.frombytes("RGB", (pixmap.width, pixmap.height), pixmap.samples)
-                        # The DPI tag makes Revit/AutoCAD place the image at the
-                        # sheet's true size instead of guessing 72/96 dpi.
-                        image.save(destination, format="JPEG", quality=95, subsampling=0,
-                                   dpi=(_EXPORT_DPI, _EXPORT_DPI))
+                        data = encode_plan_jpeg(page, 97 if kind == "mirrored" else 95,
+                                                include_footer=include_footer)
+                        destination.write_bytes(data)
                         exported.append(destination)
             except Exception as exc:
                 errors.append(f"{kind.title()} {entry.display_name or source.name}: {exc}")

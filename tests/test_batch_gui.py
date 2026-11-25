@@ -417,7 +417,8 @@ def test_batch_processes_every_pdf_and_keeps_results(qapp, tmp_path, monkeypatch
         window.close()
 
 
-def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
+@pytest.mark.parametrize("footer", [True, False])
+def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch, footer):
     from spejl.gui.main_window import MainWindow
     from spejl.gui.batch_dialogs import JpegExportDialog
     from spejl.qa import fixture_gen
@@ -426,7 +427,24 @@ def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
     info = fixture_gen.generate(tmp_path, dpi=100)
     source = tmp_path / "634-T01-A00-R-V00-R00.pdf"
     source.write_bytes(info["pdf"].read_bytes())
-    monkeypatch.setattr(JpegExportDialog, "exec", lambda self: 1)
+    from PySide6.QtCore import QSettings, Qt
+    from PySide6.QtGui import QPixmap
+    from spejl.gui import batch_dialogs
+
+    settings = QSettings(str(tmp_path / "preferences.ini"), QSettings.Format.IniFormat)
+    monkeypatch.setattr(batch_dialogs, "QSettings", lambda *_: settings)
+    previews = []
+
+    def choose(dialog):
+        assert dialog.footer.isChecked()
+        dialog.footer.setChecked(footer)
+        while dialog._pending_previews:
+            dialog._render_next_preview()
+        for _, _, label in dialog._previews:
+            previews.append(label.pixmap().toImage())
+        return 1
+
+    monkeypatch.setattr(JpegExportDialog, "exec", choose)
     monkeypatch.setattr(main_window_module.QFileDialog, "getExistingDirectory", lambda *_: str(tmp_path))
     window = MainWindow()
     try:
@@ -440,16 +458,35 @@ def test_save_as_uses_swapped_name_and_writes_jpeg(qapp, tmp_path, monkeypatch):
         mirror_jpeg = tmp_path / "634-T01-A00-S-V00-R00.jpg"
         assert source_jpeg.read_bytes().startswith(b"\xff\xd8")
         assert mirror_jpeg.read_bytes().startswith(b"\xff\xd8")
-        # Tagged 300 dpi, so CAD tools place it at the sheet's true size.
+        # Both exports trim the sheet while preserving drawing scale.
         import pymupdf
-        from PIL import Image
+        from PIL import Image, ImageChops, ImageOps
 
         with pymupdf.open(str(source)) as doc:
-            sheet_width_in = doc[0].rect.width / 72
-        for jpeg in (source_jpeg, mirror_jpeg):
+            pix = doc[0].get_pixmap(dpi=300, alpha=False)
+            sheet = Image.frombytes("RGB", (pix.width, pix.height), pix.samples)
+        bounds = ImageChops.invert(sheet).getbbox()
+        expected = ImageOps.expand(sheet.crop(bounds), (18, 14, 18, 12), "white")
+        assert settings.value("jpeg/includeFooter", type=bool) == footer
+        for jpeg, preview in zip((source_jpeg, mirror_jpeg), previews, strict=True):
+            saved = QPixmap(str(jpeg)).scaled(260, 220, Qt.AspectRatioMode.KeepAspectRatio,
+                                              Qt.TransformationMode.SmoothTransformation)
+            assert saved.toImage() == preview
+            assert jpeg.stat().st_size < 1_000_000
             with Image.open(jpeg) as image:
-                assert image.info["dpi"] == pytest.approx((300, 300))
-                assert image.width / image.info["dpi"][0] == pytest.approx(sheet_width_in, abs=0.01)
+                assert image.info["dpi"] == (300, 300)
+                if footer:
+                    from spejl.gui.jpeg_footer import with_footer
+                    assert image.size == with_footer(expected).size
+                    strip = image.crop((0, expected.height, image.width, image.height))
+                    assert strip.convert("L").getextrema()[0] < 100
+                    image = image.crop((0, 0, *expected.size))
+                assert image.size == expected.size
+                # Ignore near-white JPEG ringing when checking the four margins.
+                solid_ink = image.convert("L").point(lambda value: 255 if value < 180 else 0)
+                left, top, right, bottom = solid_ink.getbbox()
+                assert (left, top, image.width-right, image.height-bottom) == pytest.approx(
+                    (18, 14, 18, 12), abs=2)
     finally:
         window.close()
 
@@ -529,6 +566,44 @@ def test_only_checked_plan_is_mirrored(qapp, tmp_path, monkeypatch):
         assert second.status == "queued" and second.output is None
     finally:
         window.close()
+
+
+def test_repeat_mirror_counts_only_checked_plans(qtbot, tmp_path, monkeypatch):
+    import pymupdf
+    from PySide6.QtCore import Qt
+    from spejl.gui.batch_dialogs import MirrorSelectionDialog
+    from spejl.gui.main_window import MainWindow
+
+    paths = [tmp_path / f"{name}-R-V00.pdf" for name in ("A", "B")]
+    for path in paths:
+        with pymupdf.open() as doc:
+            doc.new_page().insert_text((20, 50), path.stem)
+            doc.save(path)
+    window = MainWindow()
+    qtbot.addWidget(window)
+    window._on_files_chosen(paths)
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", lambda dialog: dialog.DialogCode.Accepted)
+
+    def run_batch():
+        window._on_mirror_clicked()
+        progress = window._status_label.text()
+        qtbot.waitUntil(lambda: window._status_label.text().startswith("Batch complete:"), timeout=10000)
+        return progress, window._status_label.text()
+
+    assert run_batch()[1] == "Batch complete: 2 mirrored."
+    a, b = (window._batch_entries[p.resolve()] for p in paths)
+    previous_a, previous_b = a.output, b.output
+
+    def select_only_b(dialog):
+        dialog.list.item(0).setCheckState(Qt.CheckState.Unchecked)
+        return dialog.DialogCode.Accepted
+
+    monkeypatch.setattr(MirrorSelectionDialog, "exec", select_only_b)
+    progress, summary = run_batch()
+    assert progress.startswith(f"Mirroring 1 of 1: {paths[1].name}")
+    assert summary == "Batch complete: 1 mirrored."
+    assert a.output == previous_a and a.output.is_file()
+    assert b.output != previous_b and b.output.is_file()
 
 
 def test_source_only_jpeg_export_without_mirroring(qapp, tmp_path, monkeypatch):
