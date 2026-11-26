@@ -30,6 +30,7 @@ from PySide6.QtWidgets import (
     QScrollArea,
     QSizePolicy,
     QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
@@ -210,15 +211,32 @@ class MainWindow(QMainWindow):
         else:
             root.addWidget(sidebar)
         root.addWidget(self._build_preview_area(), stretch=1)
-        outer.addWidget(content, stretch=1)
+        self._views = QStackedWidget()
+        self._views.addWidget(content)
+        outer.addWidget(self._views, stretch=1)
         self._install_shortcuts()
+
+    def _switch_view(self, forene):
+        if self._views.count() == 1:
+            from spejl.gui.forene import ForenePanel
+            panel = ForenePanel()
+            panel.back.connect(lambda: self._switch_view(False))
+            self._views.addWidget(panel)
+        self._views.setCurrentIndex(int(forene))
+        title = "Forene — combine floor plans" if forene else "Spejl — mirror floor plans without mirroring the text"
+        self.setWindowTitle(title)
+        if not self._embedded:
+            self.findChild(QLabel, "windowTitle").setText(title)
 
     def _install_shortcuts(self) -> None:
         """Discoverable desktop conventions; each delegates to existing UI actions."""
-        QShortcut(QKeySequence.StandardKey.Open, self, activated=self._drop_zone.browse)
-        QShortcut(QKeySequence.StandardKey.Save, self, activated=self._on_save_clicked)
-        QShortcut(QKeySequence("Ctrl+Return"), self, activated=self._on_mirror_clicked)
-        QShortcut(QKeySequence("Ctrl+0"), self, activated=self._reset_mirrored_view)
+        content = self._views.widget(0)
+        for key, slot in ((QKeySequence.StandardKey.Open, self._drop_zone.browse),
+                          (QKeySequence.StandardKey.Save, self._on_save_clicked),
+                          ("Ctrl+Return", self._on_mirror_clicked),
+                          ("Ctrl+0", self._reset_mirrored_view)):
+            shortcut = QShortcut(QKeySequence(key), content, activated=slot)
+            shortcut.setContext(Qt.ShortcutContext.WidgetWithChildrenShortcut)
         if not self._embedded:
             QShortcut(QKeySequence("F11"), self, activated=self._toggle_fullscreen)
 
@@ -522,6 +540,10 @@ class MainWindow(QMainWindow):
         page_layout = QHBoxLayout(page_bar)
         page_layout.setContentsMargins(16, 8, 16, 0)
         page_layout.addStretch(1)
+        switch = QPushButton("Switch to Forene")
+        switch.setObjectName("verifyButton")
+        switch.clicked.connect(lambda: self._switch_view(True))
+        page_layout.addWidget(switch)
         self._clear_button = QPushButton("Clear")
         self._clear_button.setObjectName("verifyButton")
         self._clear_button.setToolTip("Clear loaded plans and temporary work, returning Spejl to its fresh-open state")

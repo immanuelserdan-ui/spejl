@@ -38,6 +38,13 @@ VersionInfoDescription=Spejl full offline installer
 [Tasks]
 Name: "desktopicon"; Description: "Create a desktop shortcut"; GroupDescription: "Shortcuts:"
 
+[InstallDelete]
+; Qt wheels can move their DLLs between these private runtime folders and
+; _internal. Leftover siblings take precedence when Windows loads QtCore.pyd.
+; Remove the old DLLs before [Files] lays down the complete matched set.
+Type: files; Name: "{app}\_internal\PySide6\*.dll"
+Type: files; Name: "{app}\_internal\shiboken6\*.dll"
+
 [Files]
 Source: "{#PayloadDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
 
