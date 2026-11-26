@@ -32,6 +32,9 @@ raster = [
 ]
 gui = [
     "PySide6>=6.7,<6.12",
+    "pillow>=10.3",
+    "numpy>=1.26",
+    "opencv-python>=4.9",
 ]
 
 [project.scripts]
